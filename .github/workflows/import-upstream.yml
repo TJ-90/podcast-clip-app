@@ -48,6 +48,20 @@ jobs:
             --repository . \
             --control-sha "$CONTROL_SHA"
 
+      - name: Dispatch exact-SHA tokenless validation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.import.outputs.branch }}
+          CANDIDATE: ${{ inputs.candidate }}
+          CANDIDATE_SHA: ${{ steps.import.outputs.candidate_sha }}
+        run: |
+          jq -n \
+            --arg ref "$BRANCH" \
+            --arg candidate "$CANDIDATE" \
+            --arg sha "$CANDIDATE_SHA" \
+            '{ref:$ref,inputs:{candidate:$candidate,candidate_sha:$sha,dispatch_index:"1"}}' \
+            | gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/workflows/validate-candidate.yml/dispatches" --input -
+
       - name: Open reviewable candidate pull request
         id: pr
         env:
@@ -76,20 +90,6 @@ jobs:
           echo "number=$(jq -r .number <<<"$response")" >> "$GITHUB_OUTPUT"
           echo "url=$(jq -r .html_url <<<"$response")" >> "$GITHUB_OUTPUT"
 
-      - name: Dispatch exact-SHA tokenless validation
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BRANCH: ${{ steps.import.outputs.branch }}
-          CANDIDATE: ${{ inputs.candidate }}
-          CANDIDATE_SHA: ${{ steps.import.outputs.candidate_sha }}
-        run: |
-          jq -n \
-            --arg ref "$BRANCH" \
-            --arg candidate "$CANDIDATE" \
-            --arg sha "$CANDIDATE_SHA" \
-            '{ref:$ref,inputs:{candidate:$candidate,candidate_sha:$sha,dispatch_index:"1"}}' \
-            | gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/workflows/validate-candidate.yml/dispatches" --input -
-
       - name: Publish import summary
         env:
           PR_URL: ${{ steps.pr.outputs.url }}
@@ -102,4 +102,3 @@ jobs:
             echo "- Pull request: $PR_URL"
             echo '- Validation dispatch: 1 of 3 candidate budget'
           } >> "$GITHUB_STEP_SUMMARY"
-
