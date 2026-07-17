@@ -34,7 +34,6 @@ jobs:
     env:
       CANDIDATE: ${{ inputs.candidate }}
       CANDIDATE_SHA: ${{ inputs.candidate_sha }}
-      GRADLE_USER_HOME: ${{ runner.temp }}/gradle-empty
     steps:
       - name: Validate immutable inputs
         shell: bash
@@ -63,11 +62,19 @@ jobs:
             --root candidate \
             --output "$RUNNER_TEMP/capability-report.json"
 
-      - name: Set up candidate JDK
+      - name: Set up PodAura JDK
+        if: inputs.candidate == 'podaura'
         uses: actions/setup-java@dded0888837ed1f317902acf8a20df0ad188d165 # v5.0.0
         with:
           distribution: zulu
-          java-version: ${{ inputs.candidate == 'podaura' && '25' || '21' }}
+          java-version: '25'
+
+      - name: Set up AntennaPod JDK
+        if: inputs.candidate == 'antennapod'
+        uses: actions/setup-java@dded0888837ed1f317902acf8a20df0ad188d165 # v5.0.0
+        with:
+          distribution: zulu
+          java-version: '21'
 
       - name: Install exact Android toolchain components on the fresh runner
         shell: bash
@@ -86,6 +93,7 @@ jobs:
         shell: bash
         working-directory: candidate
         run: |
+          export GRADLE_USER_HOME="$RUNNER_TEMP/gradle-empty"
           rm -rf "$GRADLE_USER_HOME"
           mkdir -p "$GRADLE_USER_HOME"
           if [[ "$CANDIDATE" == podaura ]]; then
@@ -151,4 +159,3 @@ jobs:
             --arg summary "$summary" \
             '{name:$name,head_sha:$head_sha,status:"completed",conclusion:$conclusion,output:{title:$title,summary:$summary}}' \
             | gh api --method POST "repos/${GITHUB_REPOSITORY}/check-runs" --input -
-
