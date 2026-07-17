@@ -306,3 +306,441 @@ def inventory_digest(entries: Mapping[str, GitEntry]) -> str:
 
 def report_manifest(entries: Mapping[str, GitEntry]) -> list[dict[str, str]]:
     return [asdict(entries[p]) for p in sorted(entries)]
+
+# --- Recovery audit correction: full projection, frozen controls, CLI/schema. ---
+import argparse
+import base64
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+UPSTREAM_TREE_ENTRY_COUNT = 745
+EVIDENCE_COMMIT = "37593a4217bd442d407d8b0f63d7fcb2fa10f069"
+OLD_CANDIDATE_COMMIT = "c58e2607c57925486b856416e1b3f9044673e2be"
+OLD_CANDIDATE_BRANCH = "refs/heads/candidate/antennapod-1d2bd1c8f9d3-r29562160851"
+OLD_PR = 1
+REPORT_SCHEMA = "podcast-clips/story1-recovery-preflight/v1"
+REPORT_PATH = "/tmp/podcast-clips-recovery-preflight/report.json"
+TARGET_REPOSITORY = "TJ-90/podcast-clip-app"
+UPSTREAM_REPOSITORY = "AntennaPod/AntennaPod"
+
+@dataclass(frozen=True)
+class OverlayRule:
+    type: str
+    mode: str
+    identity: str
+    category: str
+    rationale: str
+
+# Only candidate-carried trusted files are permitted. Preflight parser/tests and
+# its later workflow/uploader remain main-only controls and are never projected.
+CANDIDATE_OVERLAY_POLICY = {
+    ".github/workflows/import-upstream.yml": OverlayRule("blob", "100644", "b2083a3cc18be27aca8ba6459a17e2b47cf2b1d3", "trusted-control", "write-token import control retained inert during validation"),
+    ".github/workflows/validate-candidate.yml": OverlayRule("blob", "100644", "41e780d61b7daf8ac070cfc6d75f30897c0eb6a1", "frozen-validation", "exact build, unit, lint, reporter, permissions, and timeout contract"),
+    "DESIGN.md": OverlayRule("blob", "100644", "4234af3f9f512dd98ed50089c858150d9f32153d", "product-contract", "approved product and interaction source of truth"),
+    "LICENSE": OverlayRule("blob", "100644", "f288702d2fa16d3cdf0035b15a9fcbc552cd88e7", "legal", "project GPL-3.0 license"),
+    "README.md": OverlayRule("blob", "100644", "eed8367a80de22bc17bc1bf99e28e27f7541588c", "documentation", "project identity and recovery status"),
+    "THIRD_PARTY_NOTICES.md": OverlayRule("blob", "100644", "e7abfa3bb8e1e3f2c08f74f42751cb0c0c7472db", "legal", "upstream attribution"),
+    "UPSTREAM.md": OverlayRule("blob", "100644", "d8f3133fa5f6985f5ff9523adea2b009931b5f2c", "provenance", "pinned upstream identity and evidence"),
+    "docs/base-selection-report.md": OverlayRule("blob", "100644", "ee32be287c11a50757d68fb8b05a7d0cff2011c2", "evidence", "immutable Story 1 admission evidence"),
+    "docs/modification-ledger.md": OverlayRule("blob", "100644", "9d397c5c81c5518c2b02293779a16a664ad25b8e", "provenance", "closed modification record"),
+    "scripts/ci/audit_candidate.py": OverlayRule("blob", "100644", "7a7f236fb7fb94aa00f65c8f68e369b3aedf75f0", "frozen-validation", "actual provenance and capability test implementation"),
+    "scripts/ci/import_candidate.py": OverlayRule("blob", "100644", "0f9b4b6387822fab58a74e0b9850ca6272a8ca63", "trusted-control", "reviewed data-only importer retained for provenance"),
+}
+TRUSTED_OVERLAY_PATHS = frozenset(CANDIDATE_OVERLAY_POLICY)
+
+FROZEN_CONTROLS = {
+    "validate_candidate_blob": "41e780d61b7daf8ac070cfc6d75f30897c0eb6a1",
+    "audit_candidate_blob": "7a7f236fb7fb94aa00f65c8f68e369b3aedf75f0",
+    "tests": list(TASK_POLICY["tasks"]),
+    "tasks": list(TASK_POLICY["tasks"]),
+    "thresholds": copy.deepcopy(TASK_POLICY["thresholds"]),
+    "expected_failures": [], "exclusions": [], "noops": [],
+    "task_shadowing": False, "property_shadows": [],
+}
+FROZEN_CONTROLS_SHA256 = "5d63123058f8d45dcd7edcb265f8b719ca8bcdeaf3dd16473d52f0604c7e85ec"
+
+def validate_overlay(overlay: Mapping[str, GitEntry]) -> None:
+    if set(overlay) != set(CANDIDATE_OVERLAY_POLICY):
+        raise Reject("closed candidate overlay path set changed")
+    for path, rule in CANDIDATE_OVERLAY_POLICY.items():
+        got = overlay.get(path)
+        if got is None or (got.type, got.mode, got.identity) != (rule.type, rule.mode, rule.identity):
+            raise Reject(f"candidate overlay tuple/blob changed: {path}")
+
+def validate_frozen_controls(value: Mapping[str, object]) -> None:
+    if value != FROZEN_CONTROLS:
+        raise Reject("actual validation/audit/tests/tasks/threshold controls mutated")
+    digest = hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    if digest != FROZEN_CONTROLS_SHA256:
+        raise Reject("frozen control digest mismatch")
+
+def _tree_object_identity(children: list[GitEntry]) -> str:
+    def sort_key(entry: GitEntry) -> bytes:
+        name = entry.path.rsplit("/", 1)[-1].encode()
+        return name + (b"/" if entry.type == "tree" else b"")
+    body = bytearray()
+    for child in sorted(children, key=sort_key):
+        name = child.path.rsplit("/", 1)[-1].encode()
+        mode = b"40000" if child.type == "tree" else child.mode.encode()
+        body += mode + b" " + name + b"\0" + bytes.fromhex(child.identity)
+    return hashlib.sha1(f"tree {len(body)}\0".encode() + body).hexdigest()  # nosec: Git identity
+
+def build_tree_inventory(leaves: Mapping[str, GitEntry]) -> dict[str, GitEntry]:
+    inventory = dict(leaves)
+    directories = set()
+    for path in leaves:
+        parts = path.split("/")[:-1]
+        directories.update("/".join(parts[:i]) for i in range(1, len(parts) + 1))
+    for directory in sorted(directories, key=lambda value: (-value.count("/"), value)):
+        prefix = directory + "/"
+        children = [entry for path, entry in inventory.items()
+                    if path.startswith(prefix) and "/" not in path[len(prefix):]]
+        if not children: raise Reject(f"empty derived projected tree: {directory}")
+        inventory[directory] = GitEntry(directory, "tree", "040000", _tree_object_identity(children))
+    return inventory
+
+def project_tree(upstream: Mapping[str, GitEntry], overlay: Mapping[str, GitEntry], common_gradle: bytes):
+    validate_quarantine(upstream); validate_overlay(overlay)
+    if len(upstream) != PINNED_TUPLE_COUNT:
+        raise Reject("full upstream inventory was not supplied to projection")
+    if sum(entry.type == "tree" for entry in upstream.values()) != UPSTREAM_TREE_ENTRY_COUNT:
+        raise Reject("pinned tree-entry count changed")
+    leaf_targets, leaf_origin = {}, {}
+    branded = common_gradle
+    for old, new in ((b'"AntennaPod"', b'"Podcast Clips"'), (b'"AntennaPod Debug"', b'"Podcast Clips Debug"')):
+        if branded.count(old) != 1: raise Reject("branding anchor missing/repeated")
+        branded = branded.replace(old, new, 1)
+    for path, entry in upstream.items():
+        if entry.type == "tree": continue
+        destination = relocation(path, entry) if path in QUARANTINE else entry
+        if path == "common.gradle":
+            if git_blob_sha(common_gradle) != entry.identity: raise Reject("common.gradle byte identity mismatch")
+            destination = GitEntry(path, "blob", "100644", git_blob_sha(branded))
+        if destination.path in leaf_targets: raise Reject(f"projection leaf collision: {destination.path}")
+        leaf_targets[destination.path] = destination
+        leaf_origin[path] = destination.path
+    leaf_targets.update(overlay)
+    final_inventory = build_tree_inventory(leaf_targets)
+    mapping = []
+    for path in sorted(upstream):
+        origin = upstream[path]
+        if origin.type != "tree":
+            destination_path = leaf_origin[path]
+        else:
+            prefix = path + "/"
+            descendants = [leaf_origin[p] for p, e in upstream.items()
+                           if e.type != "tree" and p.startswith(prefix)]
+            quarantined_prefix = "upstream-quarantine/" + prefix
+            destination_path = ("upstream-quarantine/" + path
+                                if descendants and all(p.startswith(quarantined_prefix) for p in descendants)
+                                else path)
+        destination = final_inventory.get(destination_path)
+        if destination is None: raise Reject(f"upstream tuple has no projected result: {path}")
+        mapping.append({"origin": asdict(origin), "projected": asdict(destination)})
+    if len(mapping) != PINNED_TUPLE_COUNT or len({x["origin"]["path"] for x in mapping}) != PINNED_TUPLE_COUNT:
+        raise Reject("not every one of 2,028 upstream tuples maps exactly once")
+    return final_inventory, mapping
+
+def validate_exact_tuple(expected: GitEntry, observed: GitEntry) -> None:
+    if observed != expected: raise Reject("Git path/type/mode/blob-or-target tuple changed")
+
+def tuple_negative_tests() -> dict[str, str]:
+    regular_x = GitEntry("regular-x", "blob", "100755", "1" * 40)
+    regular_n = GitEntry("regular-n", "blob", "100644", "2" * 40)
+    symlink = GitEntry("link", "blob", "120000", git_blob_sha(b"target"))
+    gitlink = GitEntry("module", "commit", "160000", "3" * 40)
+    attacks = {
+        "regular-100755-to-100644": (regular_x, GitEntry("regular-x", "blob", "100644", regular_x.identity)),
+        "regular-100644-to-100755": (regular_n, GitEntry("regular-n", "blob", "100755", regular_n.identity)),
+        "regular-to-symlink": (regular_n, GitEntry("regular-n", "blob", "120000", regular_n.identity)),
+        "symlink-to-regular": (symlink, GitEntry("link", "blob", "100644", symlink.identity)),
+        "regular-to-gitlink": (regular_n, GitEntry("regular-n", "commit", "160000", regular_n.identity)),
+        "gitlink-to-regular": (gitlink, GitEntry("module", "blob", "100644", gitlink.identity)),
+        "symlink-target-identity": (symlink, GitEntry("link", "blob", "120000", git_blob_sha(b"other"))),
+        "gitlink-commit-identity": (gitlink, GitEntry("module", "commit", "160000", "4" * 40)),
+    }
+    results = {}
+    for name, values in attacks.items():
+        try: validate_exact_tuple(*values)
+        except Reject: results[name] = "rejected"
+        else: raise AssertionError(f"tuple attack accepted: {name}")
+    return results
+
+def gradle_property_negative_tests() -> dict[str, str]:
+    attacks = {
+        "androidx-omission": GRADLE_PROPERTIES.replace(b"android.useAndroidX=true\n", b""),
+        "androidx-value": GRADLE_PROPERTIES.replace(b"android.useAndroidX=true", b"android.useAndroidX=false"),
+        "nontransitive-omission": GRADLE_PROPERTIES.replace(b"android.nonTransitiveRClass=false\n", b""),
+        "nontransitive-value": GRADLE_PROPERTIES.replace(b"android.nonTransitiveRClass=false", b"android.nonTransitiveRClass=true"),
+    }
+    results = {}
+    for name, value in attacks.items():
+        try: validate_gradle_properties({"gradle.properties": value})
+        except Reject: results[name] = "rejected"
+        else: raise AssertionError(f"Gradle property attack accepted: {name}")
+    return results
+
+def recovery_scope_negative_tests() -> dict[str, str]:
+    attacks = {
+        "EF": lambda c: c["expected_failures"].append(":app:testFreeDebugUnitTest"),
+        "EXCLUDE": lambda c: c["exclusions"].append("**/transcript/**"),
+        "NOOP": lambda c: c["noops"].append(":app:lintFreeDebug"),
+        "TASK": lambda c: c["tasks"].__setitem__(0, ":app:assembleDebug"),
+        "SHADOW": lambda c: c["property_shadows"].append("android.useAndroidX"),
+        "THRESHOLD": lambda c: c["thresholds"].__setitem__("max_dispatches", 4),
+    }
+    result = {}
+    for name, mutate in attacks.items():
+        controls = copy.deepcopy(FROZEN_CONTROLS); mutate(controls)
+        try: validate_frozen_controls(controls)
+        except Reject: result[name] = "rejected"
+        else: raise AssertionError(f"RECOVERY-SCOPE {name} accepted")
+    return result
+
+def _public_bytes(url: str, maximum: int = 16 * 1024 * 1024) -> bytes:
+    request = urllib.request.Request(url, headers={"User-Agent": "podcast-clips-recovery-preflight/1"})
+    with urllib.request.urlopen(request, timeout=90) as response:
+        data = response.read(maximum + 1)
+    if len(data) > maximum: raise Reject(f"public exact-SHA response exceeds bound: {url}")
+    return data
+
+def _public_json(url: str) -> object:
+    try: return json.loads(_public_bytes(url, 32 * 1024 * 1024))
+    except (json.JSONDecodeError, urllib.error.URLError) as error: raise Reject(f"public JSON read failed: {url}: {error}") from None
+
+def _parse_any_tree(payload: Mapping[str, object], expected_root: str) -> dict[str, GitEntry]:
+    if payload.get("sha") != expected_root or payload.get("truncated") is not False:
+        raise Reject("overlay recursive tree identity/truncation mismatch")
+    result = {}
+    for row in payload.get("tree", []):
+        path = normalize_path(row["path"]); entry = GitEntry(path, row["type"], row["mode"], row["sha"])
+        if path in result: raise Reject("overlay duplicate path")
+        result[path] = entry
+    return result
+
+REPORT_KEYS = frozenset({"schema", "status", "identity", "historical_evidence", "overlay", "projection", "gradle_inputs", "negative_tests", "invariants", "isolation"})
+
+def validate_report_schema(report: Mapping[str, object]) -> None:
+    if set(report) != REPORT_KEYS or report.get("schema") != REPORT_SCHEMA or report.get("status") != "pass":
+        raise Reject("closed report schema/status mismatch")
+    expected_nested = {
+        "identity": {"upstream_commit", "upstream_tree", "upstream_archive_sha256", "overlay_sha"},
+        "historical_evidence": {"evidence_commit", "old_candidate_commit", "old_candidate_branch", "pull_request", "immutable"},
+        "overlay": {"entries", "policy_digest"},
+        "projection": {"upstream_tuple_count", "upstream_tree_count", "upstream_digest", "projected_tuple_count", "projected_digest", "origin_projection"},
+        "gradle_inputs": {"known_inventory", "dynamic_inputs", "gradle_properties_blob", "wrapper_distribution_sha256", "wrapper_jar_sha256"},
+        "negative_tests": {"tuples", "gradle_properties", "recovery_scope"},
+        "invariants": {"one_preflight", "fresh_identity", "validation_budget"},
+        "isolation": {"sanitized_environment", "candidate_workspace", "credential_channels", "runtime_cache_result_channels", "constant_report_path"},
+    }
+    for field, keys in expected_nested.items():
+        if not isinstance(report[field], Mapping) or set(report[field]) != keys:
+            raise Reject(f"closed report nested schema mismatch: {field}")
+
+def validate_operational_invariants(run_payload, refs_payload) -> dict[str, object]:
+    if not isinstance(run_payload, Mapping) or run_payload.get("total_count") != 1:
+        raise Reject("exactly one preflight dispatch is required")
+    runs = run_payload.get("workflow_runs")
+    if not isinstance(runs, list) or len(runs) != 1 or runs[0].get("run_attempt") != 1:
+        raise Reject("preflight rerun/attempt is forbidden")
+    if not isinstance(refs_payload, list): raise Reject("candidate refs payload malformed")
+    refs = {item.get("ref"): item.get("object", {}).get("sha") for item in refs_payload}
+    if refs != {OLD_CANDIDATE_BRANCH: OLD_CANDIDATE_COMMIT}:
+        raise Reject("fresh recovery identity already exists or old evidence branch changed")
+    return {
+        "one_preflight": {"maximum": 1, "observed": 1, "run_attempt": 1},
+        "fresh_identity": {"must_be_created_after_preflight": True, "present": False, "allowed_historical_identity": OLD_CANDIDATE_COMMIT},
+        "validation_budget": {"maximum_dispatches": 3, "used_for_fresh_identity": 0, "required_consecutive_successes": 2, "run2_failure_stop": True},
+    }
+
+def run_preflight(overlay_sha: str) -> dict[str, object]:
+    validate_environment()
+    if not re.fullmatch(r"[0-9a-f]{40}", overlay_sha): raise Reject("exact overlay SHA required")
+    api = "https://api.github.com/repos"
+    commit_payload = _public_json(f"{api}/{UPSTREAM_REPOSITORY}/commits/{UPSTREAM_COMMIT}")
+    validate_commit(commit_payload)
+    tree_payload = _public_json(f"{api}/{UPSTREAM_REPOSITORY}/git/trees/{UPSTREAM_TREE}?recursive=1")
+    upstream = parse_git_tree(tree_payload)
+    validate_known_inputs(upstream)
+    overlay_commit = _public_json(f"{api}/{TARGET_REPOSITORY}/git/commits/{overlay_sha}")
+    if overlay_commit.get("sha") != overlay_sha: raise Reject("overlay commit mismatch")
+    overlay_root = overlay_commit["tree"]["sha"]
+    overlay_all = _parse_any_tree(_public_json(f"{api}/{TARGET_REPOSITORY}/git/trees/{overlay_root}?recursive=1"), overlay_root)
+    overlay = {path: overlay_all[path] for path in CANDIDATE_OVERLAY_POLICY if path in overlay_all}
+    validate_overlay(overlay); validate_frozen_controls(FROZEN_CONTROLS)
+    contents = {}
+    required = set().union(*(set(value) for value in KNOWN_INPUTS.values()))
+    for path in sorted(required):
+        data = _public_bytes(f"https://raw.githubusercontent.com/{UPSTREAM_REPOSITORY}/{UPSTREAM_COMMIT}/{path}")
+        if git_blob_sha(data) != upstream[path].identity: raise Reject(f"known input byte/Git identity mismatch: {path}")
+        contents[path] = data
+    validate_gradle_properties({path: contents[path] for path in KNOWN_INPUTS["gradle_properties"]})
+    dynamic = scan_dynamic_inputs(contents, upstream)
+    validate_wrapper(contents["gradle/wrapper/gradle-wrapper.properties"], contents["gradle/wrapper/gradle-wrapper.jar"])
+    projected, origin_projection = project_tree(upstream, overlay, contents["common.gradle"])
+    evidence = _public_json(f"{api}/{TARGET_REPOSITORY}/git/commits/{EVIDENCE_COMMIT}")
+    old_candidate = _public_json(f"{api}/{TARGET_REPOSITORY}/git/commits/{OLD_CANDIDATE_COMMIT}")
+    pr = _public_json(f"{api}/{TARGET_REPOSITORY}/pulls/{OLD_PR}")
+    if evidence.get("sha") != EVIDENCE_COMMIT or old_candidate.get("sha") != OLD_CANDIDATE_COMMIT:
+        raise Reject("historical commit evidence changed")
+    if pr.get("state") != "closed" or pr.get("merged") is not False or pr.get("head", {}).get("sha") != OLD_CANDIDATE_COMMIT:
+        raise Reject("historical PR evidence changed")
+    runs = _public_json(f"{api}/{TARGET_REPOSITORY}/actions/workflows/preflight-recovery.yml/runs?event=workflow_dispatch&per_page=100")
+    refs = _public_json(f"{api}/{TARGET_REPOSITORY}/git/matching-refs/heads/candidate/antennapod")
+    invariants = validate_operational_invariants(runs, refs)
+    policy_rows = [{"path": path, **asdict(CANDIDATE_OVERLAY_POLICY[path])} for path in sorted(CANDIDATE_OVERLAY_POLICY)]
+    report = {
+        "schema": REPORT_SCHEMA, "status": "pass",
+        "identity": {"upstream_commit": UPSTREAM_COMMIT, "upstream_tree": UPSTREAM_TREE,
+                     "upstream_archive_sha256": UPSTREAM_ARCHIVE_SHA256, "overlay_sha": overlay_sha},
+        "historical_evidence": {"evidence_commit": EVIDENCE_COMMIT, "old_candidate_commit": OLD_CANDIDATE_COMMIT,
+                                "old_candidate_branch": OLD_CANDIDATE_BRANCH, "pull_request": OLD_PR, "immutable": True},
+        "overlay": {"entries": policy_rows, "policy_digest": hashlib.sha256(json.dumps(policy_rows, sort_keys=True, separators=(",", ":")).encode()).hexdigest()},
+        "projection": {"upstream_tuple_count": len(upstream), "upstream_tree_count": sum(x.type == "tree" for x in upstream.values()),
+                       "upstream_digest": inventory_digest(upstream), "projected_tuple_count": len(projected),
+                       "projected_digest": inventory_digest(projected), "origin_projection": origin_projection},
+        "gradle_inputs": {"known_inventory": KNOWN_INPUTS, "dynamic_inputs": dynamic,
+                          "gradle_properties_blob": GRADLE_PROPERTIES_BLOB,
+                          "wrapper_distribution_sha256": GRADLE_DISTRIBUTION_SHA256,
+                          "wrapper_jar_sha256": GRADLE_WRAPPER_JAR_SHA256},
+        "negative_tests": {"tuples": tuple_negative_tests(), "gradle_properties": gradle_property_negative_tests(),
+                           "recovery_scope": recovery_scope_negative_tests()},
+        "invariants": invariants,
+        "isolation": {"sanitized_environment": True, "candidate_workspace": "absent", "credential_channels": "absent",
+                      "runtime_cache_result_channels": "absent", "constant_report_path": REPORT_PATH},
+    }
+    validate_report_schema(report)
+    return report
+
+def write_constant_report(report: Mapping[str, object]) -> None:
+    validate_report_schema(report)
+    parent = Path(REPORT_PATH).parent
+    if parent.exists(): raise Reject("constant trusted report directory already exists")
+    parent.mkdir(mode=0o700)
+    data = (json.dumps(report, indent=2, sort_keys=True) + "\n").encode()
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"): flags |= os.O_NOFOLLOW
+    descriptor = os.open(REPORT_PATH, flags, 0o600)
+    with os.fdopen(descriptor, "wb") as handle: handle.write(data)
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--overlay-sha", required=True)
+    args = parser.parse_args()
+    report = run_preflight(args.overlay_sha)
+    write_constant_report(report)
+    print(hashlib.sha256((json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n").encode()).hexdigest())
+
+
+WRAPPER_PROPERTIES = (
+    b"#Sun Aug 17 17:07:23 CEST 2025\n"
+    b"distributionBase=GRADLE_USER_HOME\n"
+    b"distributionPath=wrapper/dists\n"
+    b"distributionUrl=https\\://services.gradle.org/distributions/gradle-8.13-bin.zip\n"
+    b"networkTimeout=10000\n"
+    b"validateDistributionUrl=true\n"
+    b"zipStoreBase=GRADLE_USER_HOME\n"
+    b"zipStorePath=wrapper/dists\n"
+)
+WRAPPER_PROPERTIES_BLOB = "68f6c2ca1fa1e49799ea485892b67296e9876ec1"
+WRAPPER_JAR_BLOB = "d64cd4917707c1f8861d8cb53dd15194d4248596"
+
+def validate_wrapper(properties: bytes, jar: bytes) -> None:
+    if properties != WRAPPER_PROPERTIES or git_blob_sha(properties) != WRAPPER_PROPERTIES_BLOB:
+        raise Reject("Gradle wrapper properties bytes/blob changed")
+    if b"distributionUrl=" + GRADLE_DISTRIBUTION_URL.encode() not in properties:
+        raise Reject("Gradle distribution URL changed")
+    if git_blob_sha(jar) != WRAPPER_JAR_BLOB or hashlib.sha256(jar).hexdigest() != GRADLE_WRAPPER_JAR_SHA256:
+        raise Reject("Gradle wrapper JAR blob/checksum changed")
+
+def _public_sha256(url: str, maximum: int = 1024 * 1024 * 1024) -> str:
+    request = urllib.request.Request(url, headers={"User-Agent": "podcast-clips-recovery-preflight/1"})
+    digest, total = hashlib.sha256(), 0
+    with urllib.request.urlopen(request, timeout=120) as response:
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk: break
+            total += len(chunk)
+            if total > maximum: raise Reject("public exact-SHA archive exceeds bound")
+            digest.update(chunk)
+    return digest.hexdigest()
+
+def validate_report_schema(report: Mapping[str, object]) -> None:
+    if set(report) != REPORT_KEYS or report.get("schema") != REPORT_SCHEMA or report.get("status") != "pass":
+        raise Reject("closed report schema/status mismatch")
+    exact = {
+        "identity": {"upstream_commit", "upstream_tree", "upstream_archive_sha256", "overlay_sha"},
+        "historical_evidence": {"evidence_commit", "old_candidate_commit", "old_candidate_branch", "pull_request", "immutable"},
+        "overlay": {"entries", "policy_digest"},
+        "projection": {"upstream_tuple_count", "upstream_tree_count", "upstream_digest", "projected_tuple_count", "projected_digest", "origin_projection"},
+        "gradle_inputs": {"known_inventory", "dynamic_inputs", "gradle_properties_blob", "wrapper_distribution_sha256", "wrapper_jar_sha256"},
+        "negative_tests": {"tuples", "gradle_properties", "recovery_scope"},
+        "invariants": {"one_preflight", "fresh_identity", "validation_budget"},
+        "isolation": {"sanitized_environment", "candidate_workspace", "credential_channels", "runtime_cache_result_channels", "constant_report_path"},
+    }
+    for field, keys in exact.items():
+        if not isinstance(report[field], Mapping) or set(report[field]) != keys:
+            raise Reject(f"closed report nested schema mismatch: {field}")
+    if set(report["invariants"]["one_preflight"]) != {"maximum", "observed", "run_attempt"}:
+        raise Reject("one-preflight schema changed")
+    if set(report["invariants"]["fresh_identity"]) != {"must_be_created_after_preflight", "present", "allowed_historical_identity"}:
+        raise Reject("fresh-identity schema changed")
+    if set(report["invariants"]["validation_budget"]) != {"maximum_dispatches", "used_for_fresh_identity", "required_consecutive_successes", "run2_failure_stop"}:
+        raise Reject("validation-budget schema changed")
+    if set(report["negative_tests"]["tuples"]) != {"regular-100755-to-100644", "regular-100644-to-100755", "regular-to-symlink", "symlink-to-regular", "regular-to-gitlink", "gitlink-to-regular", "symlink-target-identity", "gitlink-commit-identity"}:
+        raise Reject("tuple negative-test schema changed")
+    if set(report["negative_tests"]["gradle_properties"]) != {"androidx-omission", "androidx-value", "nontransitive-omission", "nontransitive-value"}:
+        raise Reject("Gradle-property negative-test schema changed")
+    if set(report["negative_tests"]["recovery_scope"]) != {"EF", "EXCLUDE", "NOOP", "TASK", "SHADOW", "THRESHOLD"}:
+        raise Reject("RECOVERY-SCOPE negative-test schema changed")
+    if set(report["gradle_inputs"]["known_inventory"]) != set(KNOWN_INPUTS):
+        raise Reject("known-input report schema changed")
+    if set(report["gradle_inputs"]["dynamic_inputs"]) != {"literal_environment_and_properties", "static_root_config", "unresolved"}:
+        raise Reject("dynamic-input report schema changed")
+    if report["projection"]["upstream_tuple_count"] != PINNED_TUPLE_COUNT or report["projection"]["upstream_tree_count"] != UPSTREAM_TREE_ENTRY_COUNT:
+        raise Reject("reported full tuple/tree counts changed")
+    if len(report["projection"]["origin_projection"]) != PINNED_TUPLE_COUNT:
+        raise Reject("origin projection is incomplete")
+    for row in report["projection"]["origin_projection"]:
+        if set(row) != {"origin", "projected"} or set(row["origin"]) != {"path", "type", "mode", "identity"} or set(row["projected"]) != {"path", "type", "mode", "identity"}:
+            raise Reject("origin-projection tuple schema changed")
+    for row in report["overlay"]["entries"]:
+        if set(row) != {"path", "type", "mode", "identity", "category", "rationale"}:
+            raise Reject("overlay entry schema changed")
+    if report["isolation"]["constant_report_path"] != REPORT_PATH:
+        raise Reject("constant report path changed")
+
+_run_preflight_unbound = run_preflight
+def run_preflight(overlay_sha: str) -> dict[str, object]:
+    validate_environment()
+    if not re.fullmatch(r"[0-9a-f]{40}", overlay_sha): raise Reject("exact overlay SHA required")
+    main = _public_json(f"https://api.github.com/repos/{TARGET_REPOSITORY}/branches/main")
+    if main.get("commit", {}).get("sha") != overlay_sha:
+        raise Reject("overlay SHA is not the exact current main identity")
+    observed_archive = _public_sha256(f"https://codeload.github.com/{UPSTREAM_REPOSITORY}/tar.gz/{UPSTREAM_COMMIT}")
+    if observed_archive != UPSTREAM_ARCHIVE_SHA256:
+        raise Reject("pinned public archive SHA-256 mismatch")
+    report = _run_preflight_unbound(overlay_sha)
+    validate_report_schema(report)
+    return report
+
+def write_constant_report(report: Mapping[str, object]) -> str:
+    validate_report_schema(report)
+    parent = Path(REPORT_PATH).parent
+    if parent.exists(): raise Reject("constant trusted report directory already exists")
+    parent.mkdir(mode=0o700)
+    data = (json.dumps(report, indent=2, sort_keys=True) + "\n").encode()
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"): flags |= os.O_NOFOLLOW
+    descriptor = os.open(REPORT_PATH, flags, 0o600)
+    with os.fdopen(descriptor, "wb") as handle: handle.write(data)
+    return hashlib.sha256(data).hexdigest()
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--overlay-sha", required=True)
+    args = parser.parse_args()
+    print(write_constant_report(run_preflight(args.overlay_sha)))
+
+if __name__ == "__main__": main()
