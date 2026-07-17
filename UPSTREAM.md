@@ -2,7 +2,7 @@
 
 This repository is a public GPL-3.0 project. Imported candidates are source snapshots; the repository does not claim to preserve upstream Git history.
 
-Current selection status: **RALPLAN_REQUIRED — no base admitted**.
+Current selection status: **RECOVERY_PREFLIGHT_FAILED — no base admitted**.
 
 ## Rejected primary candidate: PodAura
 
@@ -26,3 +26,10 @@ Current selection status: **RALPLAN_REQUIRED — no base admitted**.
 
 The exact run ledger, security boundary, and stop rationale are recorded in [`docs/base-selection-report.md`](docs/base-selection-report.md). Do not merge or build product work on the preserved candidate unless a new RALPLAN decision explicitly reopens the gate.
 
+## One-time recovery result
+
+The independently reviewed recovery controls were frozen at [fc0ed383c0f4e1cf527f88d0ac3033973a379a4e](https://github.com/TJ-90/podcast-clip-app/commit/fc0ed383c0f4e1cf527f88d0ac3033973a379a4e). The permissions-empty preflight was dispatched exactly once as [run 29575201182](https://github.com/TJ-90/podcast-clip-app/actions/runs/29575201182), attempt 1. Its immutable identity guard, no-checkout control fetch, and 11 stdlib tests passed. The sanitized parser rejected the unresolved relative static input '../common.gradle', and the report validator/uploader were skipped.
+
+This failure is terminal under the approved one-preflight contract. There was no rerun, no second preflight, no fresh candidate identity, no candidate PR, and no fresh validation dispatch. The two historical candidate branches and closed PR #1 remain evidence only. AntennaPod is not admitted; do not begin Story 2.
+
+No Android/source archive, Gradle distribution, SDK, dependency, candidate content, CI artifact, or APK was downloaded to the operator device. Only GitHub API metadata and the failed job log were inspected.

@@ -1,6 +1,6 @@
 # Story 1 base-selection report
 
-Status: **RALPLAN_REQUIRED**  
+Status: **RECOVERY_PREFLIGHT_FAILED**  
 Recorded: 2026-07-17 UTC  
 Repository: https://github.com/TJ-90/podcast-clip-app
 
@@ -62,3 +62,14 @@ Candidate commit `c58e2607c57925486b856416e1b3f9044673e2be` was never amended. N
 
 RALPLAN must explicitly decide whether to authorize a fresh exact candidate identity with a complete reviewed environment overlay and a reset evidence budget, select a different base under an equal gate, or stop. Implementation must not silently relax the two-success rule or reinterpret either counted failure.
 
+## One-time recovery terminal evidence
+
+The reviewed one-time recovery reopened only a single preflight attempt; it did not reset or relax any candidate-validation condition. Trusted control commit [fc0ed383c0f4e1cf527f88d0ac3033973a379a4e](https://github.com/TJ-90/podcast-clip-app/commit/fc0ed383c0f4e1cf527f88d0ac3033973a379a4e) registered workflow ID 315057380 with zero prior dispatches. Main, workflow identity, and the zero-run count were re-read immediately before dispatch.
+
+The workflow was dispatched exactly once as [run 29575201182](https://github.com/TJ-90/podcast-clip-app/actions/runs/29575201182), attempt 1, at the exact control head. Job 87867988858 proved the sole workflow_dispatch identity, fetched and Git-blob-verified the immutable parser/test/validator controls without checkout, and passed all 11 stdlib control tests. The sanitized non-executing parser then failed closed with: Reject: non-canonical Git path: '../common.gradle'.
+
+The path is a relative static Gradle input encountered by the trusted parser. This is a preflight-control rejection; no candidate source was executed. The closed-report validator and pinned uploader were skipped, so no preflight report artifact was published or downloaded. The workflow concluded failure; its dispatch count remains exactly one. Main remained fc0ed383c0f4e1cf527f88d0ac3033973a379a4e throughout the run.
+
+Per the approved recovery contract, failure or cancellation of the sole preflight is terminal. The run was not rerun, no second preflight was created, no fresh candidate identity/branch/PR was created, and no fresh candidate-validation dispatch was spent. AntennaPod remains unadmitted and Story 2 must not start.
+
+Only GitHub API metadata and the job log were inspected from the operator device. No source archive, Gradle distribution, Android SDK, dependency, CI artifact, APK, or candidate content was downloaded locally.
