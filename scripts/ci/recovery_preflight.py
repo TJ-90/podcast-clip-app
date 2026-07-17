@@ -743,4 +743,157 @@ def main() -> None:
     args = parser.parse_args()
     print(write_constant_report(run_preflight(args.overlay_sha)))
 
-if __name__ == "__main__": main()
+
+HISTORICAL_REFS={
+ "refs/heads/candidate/antennapod-1d2bd1c8f9d3-r29562152128":"1152cfce3b78cbc9cfb64a69bb0eb68551273371",
+ "refs/heads/candidate/antennapod-1d2bd1c8f9d3-r29562160851":OLD_CANDIDATE_COMMIT,
+}
+HISTORICAL_RUNS={
+ "29562294514":{"id":29562294514,"conclusion":"failure","event":"workflow_dispatch","head_sha":OLD_CANDIDATE_COMMIT,"workflow_id":314940238,"workflow_path":".github/workflows/validate-candidate.yml","workflow_name":"Validate exact candidate"},
+ "29562814924":{"id":29562814924,"conclusion":"failure","event":"workflow_dispatch","head_sha":"2a29aaf00b6c9414f627b1e4a24a8536412c47d7","workflow_id":314940238,"workflow_path":".github/workflows/validate-candidate.yml","workflow_name":"Validate exact candidate"},
+ "29563023789":{"id":29563023789,"conclusion":"cancelled","event":"workflow_dispatch","head_sha":"2a29aaf00b6c9414f627b1e4a24a8536412c47d7","workflow_id":314940238,"workflow_path":".github/workflows/validate-candidate.yml","workflow_name":"Validate exact candidate"},
+}
+HISTORICAL_PR={"number":1,"state":"closed","merged":False,"head_sha":OLD_CANDIDATE_COMMIT}
+PREFLIGHT_WORKFLOW_PATH=".github/workflows/preflight-recovery.yml"
+PREFLIGHT_WORKFLOW_NAME="Story 1 recovery preflight"
+
+_tuple_attacks_v2=tuple_negative_tests
+def tuple_negative_tests():
+ result=_tuple_attacks_v2()
+ link=GitEntry("link","blob","120000",git_blob_sha(b"target")); module=GitEntry("module","commit","160000","3"*40)
+ attacks={"symlink-to-gitlink":(link,GitEntry("link","commit","160000",link.identity)),
+          "gitlink-to-symlink":(module,GitEntry("module","blob","120000",module.identity))}
+ for name,attack in attacks.items():
+  try: validate_exact_tuple(*attack)
+  except Reject: result[name]="rejected"
+  else: raise AssertionError(f"direct tuple attack accepted: {name}")
+ return result
+
+_property_attacks_v2=gradle_property_negative_tests
+def gradle_property_negative_tests():
+ result=_property_attacks_v2()
+ attacks={"jvmargs-omission":GRADLE_PROPERTIES.replace(b"org.gradle.jvmargs=-Xmx4096m\n",b""),
+          "jvmargs-value":GRADLE_PROPERTIES.replace(b"org.gradle.jvmargs=-Xmx4096m",b"org.gradle.jvmargs=-Xmx2048m")}
+ for name,value in attacks.items():
+  try: validate_gradle_properties({"gradle.properties":value})
+  except Reject: result[name]="rejected"
+  else: raise AssertionError(f"JVM property attack accepted: {name}")
+ return result
+
+def validate_operational_invariants(run_payload,refs_payload):
+ if not isinstance(refs_payload,list): raise Reject("candidate refs payload malformed")
+ refs={item.get("ref"):item.get("object",{}).get("sha") for item in refs_payload}
+ if refs!=HISTORICAL_REFS: raise Reject("historical candidate ref addition or mutation")
+ if not isinstance(run_payload,Mapping) or run_payload.get("total_count")!=1: raise Reject("exactly one preflight required")
+ runs=run_payload.get("workflow_runs")
+ if not isinstance(runs,list) or len(runs)!=1: raise Reject("sole preflight missing/duplicated")
+ run=runs[0]
+ if run.get("run_attempt")!=1 or run.get("event")!="workflow_dispatch": raise Reject("preflight attempt/event mismatch")
+ if run.get("path")!=PREFLIGHT_WORKFLOW_PATH or run.get("name")!=PREFLIGHT_WORKFLOW_NAME: raise Reject("preflight workflow identity mismatch")
+ head=run.get("head_sha")
+ if not isinstance(head,str) or not re.fullmatch(r"[0-9a-f]{40}",head): raise Reject("preflight head SHA invalid")
+ return {"one_preflight":{"maximum":1,"observed":1,"run_attempt":1,"head_sha":head,"event":"workflow_dispatch","workflow_path":PREFLIGHT_WORKFLOW_PATH,"workflow_name":PREFLIGHT_WORKFLOW_NAME},
+         "fresh_identity":{"must_be_created_after_preflight":True,"present":False,"allowed_historical_refs":copy.deepcopy(HISTORICAL_REFS)},
+         "validation_budget":{"maximum_dispatches":3,"used_for_fresh_identity":0,"required_consecutive_successes":2,"run2_failure_stop":True}}
+
+def _expected_overlay_rows(): return [{"path":path,**asdict(CANDIDATE_OVERLAY_POLICY[path])} for path in sorted(CANDIDATE_OVERLAY_POLICY)]
+def _rows_digest(rows):
+ values={}
+ for row in rows:
+  if not isinstance(row,Mapping) or set(row)!={"path","type","mode","identity"}: raise Reject("tuple row schema changed")
+  entry=GitEntry(row["path"],row["type"],row["mode"],row["identity"])
+  if entry.path in values: raise Reject("duplicate tuple row")
+  values[entry.path]=entry
+ return inventory_digest(values)
+def _all_rejected(value,names): return isinstance(value,Mapping) and set(value)==names and all(x=="rejected" for x in value.values())
+
+def validate_report_schema(report):
+ if not isinstance(report,Mapping) or set(report)!=REPORT_KEYS or report.get("schema")!=REPORT_SCHEMA or report.get("status")!="pass": raise Reject("report envelope changed")
+ identity=report.get("identity")
+ if not isinstance(identity,Mapping) or set(identity)!={"upstream_commit","upstream_tree","upstream_archive_sha256","overlay_sha"}: raise Reject("identity schema changed")
+ if (identity["upstream_commit"],identity["upstream_tree"],identity["upstream_archive_sha256"])!=(UPSTREAM_COMMIT,UPSTREAM_TREE,UPSTREAM_ARCHIVE_SHA256): raise Reject("identity values changed")
+ if not isinstance(identity["overlay_sha"],str) or not re.fullmatch(r"[0-9a-f]{40}",identity["overlay_sha"]): raise Reject("overlay SHA invalid")
+ expected_history={"evidence_commit":EVIDENCE_COMMIT,"candidate_refs":HISTORICAL_REFS,"pull_request":HISTORICAL_PR,"validation_runs":HISTORICAL_RUNS,"immutable":True}
+ if report.get("historical_evidence")!=expected_history: raise Reject("historical evidence values changed")
+ rows=_expected_overlay_rows(); overlay_digest=hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+ if report.get("overlay")!={"entries":rows,"policy_digest":overlay_digest}: raise Reject("overlay rows/digest changed")
+ projection=report.get("projection"); keys={"upstream_tuple_count","upstream_tree_count","upstream_digest","projected_tuple_count","projected_digest","origin_projection","projected_manifest"}
+ if not isinstance(projection,Mapping) or set(projection)!=keys: raise Reject("projection schema changed")
+ if projection["upstream_tuple_count"]!=2028 or projection["upstream_tree_count"]!=745: raise Reject("projection counts changed")
+ mappings=projection["origin_projection"]; manifest=projection["projected_manifest"]
+ if not isinstance(mappings,list) or len(mappings)!=2028 or not isinstance(manifest,list): raise Reject("projection manifests malformed")
+ projected={row.get("path"):row for row in manifest if isinstance(row,Mapping)}
+ if len(projected)!=len(manifest): raise Reject("projected manifest duplicates")
+ origins=[]
+ for mapping in mappings:
+  if not isinstance(mapping,Mapping) or set(mapping)!={"origin","projected"}: raise Reject("origin mapping schema changed")
+  origins.append(mapping["origin"]); result=mapping["projected"]
+  if not isinstance(result,Mapping) or projected.get(result.get("path"))!=result: raise Reject("origin result not bound to manifest")
+ if _rows_digest(origins)!=PINNED_TUPLE_DIGEST or projection["upstream_digest"]!=PINNED_TUPLE_DIGEST: raise Reject("upstream digest changed")
+ digest=_rows_digest(manifest)
+ if projection["projected_tuple_count"]!=len(manifest) or projection["projected_digest"]!=digest: raise Reject("projected digest/count changed")
+ gradle=report.get("gradle_inputs")
+ expected_gradle_keys={"known_inventory","dynamic_inputs","gradle_properties_blob","wrapper_distribution_sha256","wrapper_jar_sha256"}
+ if not isinstance(gradle,Mapping) or set(gradle)!=expected_gradle_keys: raise Reject("Gradle schema changed")
+ if gradle["known_inventory"]!=KNOWN_INPUTS or gradle["gradle_properties_blob"]!=GRADLE_PROPERTIES_BLOB or gradle["wrapper_distribution_sha256"]!=GRADLE_DISTRIBUTION_SHA256 or gradle["wrapper_jar_sha256"]!=GRADLE_WRAPPER_JAR_SHA256: raise Reject("Gradle constants changed")
+ dynamic=gradle["dynamic_inputs"]
+ if not isinstance(dynamic,Mapping) or set(dynamic)!={"literal_environment_and_properties","static_root_config","unresolved"} or dynamic["unresolved"]!=[]: raise Reject("dynamic inputs unresolved/changed")
+ if any(set(x)!={"path","api","name"} for x in dynamic["literal_environment_and_properties"]): raise Reject("literal input row changed")
+ if any(set(x)!={"declared_by","path"} for x in dynamic["static_root_config"]): raise Reject("static config row changed")
+ negative=report.get("negative_tests")
+ tuple_names={"regular-100755-to-100644","regular-100644-to-100755","regular-to-symlink","symlink-to-regular","regular-to-gitlink","gitlink-to-regular","symlink-target-identity","gitlink-commit-identity","symlink-to-gitlink","gitlink-to-symlink"}
+ property_names={"androidx-omission","androidx-value","nontransitive-omission","nontransitive-value","jvmargs-omission","jvmargs-value"}
+ scope_names={"EF","EXCLUDE","NOOP","TASK","SHADOW","THRESHOLD"}
+ if not isinstance(negative,Mapping) or set(negative)!={"tuples","gradle_properties","recovery_scope"}: raise Reject("negative schema changed")
+ if not _all_rejected(negative["tuples"],tuple_names) or not _all_rejected(negative["gradle_properties"],property_names) or not _all_rejected(negative["recovery_scope"],scope_names): raise Reject("negative outcomes changed")
+ exact_one={"maximum":1,"observed":1,"run_attempt":1,"head_sha":identity["overlay_sha"],"event":"workflow_dispatch","workflow_path":PREFLIGHT_WORKFLOW_PATH,"workflow_name":PREFLIGHT_WORKFLOW_NAME}
+ exact_fresh={"must_be_created_after_preflight":True,"present":False,"allowed_historical_refs":HISTORICAL_REFS}
+ exact_budget={"maximum_dispatches":3,"used_for_fresh_identity":0,"required_consecutive_successes":2,"run2_failure_stop":True}
+ if report.get("invariants")!={"one_preflight":exact_one,"fresh_identity":exact_fresh,"validation_budget":exact_budget}: raise Reject("invariant values changed")
+ exact_isolation={"sanitized_environment":True,"candidate_workspace":"absent","credential_channels":"absent","runtime_cache_result_channels":"absent","constant_report_path":REPORT_PATH}
+ if report.get("isolation")!=exact_isolation: raise Reject("isolation values changed")
+
+def _history_run(payload):
+ return {"id":payload.get("id"),"conclusion":payload.get("conclusion"),"event":payload.get("event"),"head_sha":payload.get("head_sha"),"workflow_id":payload.get("workflow_id"),"workflow_path":payload.get("path"),"workflow_name":payload.get("name")}
+
+def run_preflight(overlay_sha):
+ validate_environment()
+ if not re.fullmatch(r"[0-9a-f]{40}",overlay_sha): raise Reject("exact overlay SHA required")
+ api="https://api.github.com/repos"
+ if _public_json(f"{api}/{TARGET_REPOSITORY}/branches/main").get("commit",{}).get("sha")!=overlay_sha: raise Reject("overlay is not current main")
+ if _public_sha256(f"https://codeload.github.com/{UPSTREAM_REPOSITORY}/tar.gz/{UPSTREAM_COMMIT}")!=UPSTREAM_ARCHIVE_SHA256: raise Reject("archive digest changed")
+ commit=_public_json(f"{api}/{UPSTREAM_REPOSITORY}/commits/{UPSTREAM_COMMIT}"); validate_commit(commit)
+ upstream=parse_git_tree(_public_json(f"{api}/{UPSTREAM_REPOSITORY}/git/trees/{UPSTREAM_TREE}?recursive=1")); validate_known_inputs(upstream)
+ overlay_commit=_public_json(f"{api}/{TARGET_REPOSITORY}/git/commits/{overlay_sha}")
+ if overlay_commit.get("sha")!=overlay_sha: raise Reject("overlay commit changed")
+ root=overlay_commit["tree"]["sha"]; all_overlay=_parse_any_tree(_public_json(f"{api}/{TARGET_REPOSITORY}/git/trees/{root}?recursive=1"),root)
+ candidate_overlay={path:all_overlay[path] for path in CANDIDATE_OVERLAY_POLICY if path in all_overlay}; validate_overlay(candidate_overlay); validate_frozen_controls(FROZEN_CONTROLS)
+ required=set().union(*(set(v) for v in KNOWN_INPUTS.values())); contents={}
+ for path in sorted(required):
+  data=_public_bytes(f"https://raw.githubusercontent.com/{UPSTREAM_REPOSITORY}/{UPSTREAM_COMMIT}/{path}")
+  if git_blob_sha(data)!=upstream[path].identity: raise Reject(f"known input identity changed: {path}")
+  contents[path]=data
+ validate_gradle_properties({"gradle.properties":contents["gradle.properties"]}); dynamic=scan_dynamic_inputs(contents,upstream)
+ validate_wrapper(contents["gradle/wrapper/gradle-wrapper.properties"],contents["gradle/wrapper/gradle-wrapper.jar"])
+ projected,mappings=project_tree(upstream,candidate_overlay,contents["common.gradle"])
+ if _public_json(f"{api}/{TARGET_REPOSITORY}/git/commits/{EVIDENCE_COMMIT}").get("sha")!=EVIDENCE_COMMIT: raise Reject("evidence commit changed")
+ for ref,sha in HISTORICAL_REFS.items():
+  if _public_json(f"{api}/{TARGET_REPOSITORY}/git/commits/{sha}").get("sha")!=sha: raise Reject(f"historical ref commit missing: {ref}")
+ pr=_public_json(f"{api}/{TARGET_REPOSITORY}/pulls/1"); observed_pr={"number":pr.get("number"),"state":pr.get("state"),"merged":pr.get("merged"),"head_sha":pr.get("head",{}).get("sha")}
+ if observed_pr!=HISTORICAL_PR: raise Reject("historical PR changed")
+ for run_id,expected in HISTORICAL_RUNS.items():
+  if _history_run(_public_json(f"{api}/{TARGET_REPOSITORY}/actions/runs/{run_id}"))!=expected: raise Reject(f"historical run changed: {run_id}")
+ runs=_public_json(f"{api}/{TARGET_REPOSITORY}/actions/workflows/preflight-recovery.yml/runs?event=workflow_dispatch&per_page=100")
+ refs=_public_json(f"{api}/{TARGET_REPOSITORY}/git/matching-refs/heads/candidate/antennapod")
+ invariants=validate_operational_invariants(runs,refs); rows=_expected_overlay_rows(); manifest=report_manifest(projected)
+ report={"schema":REPORT_SCHEMA,"status":"pass",
+ "identity":{"upstream_commit":UPSTREAM_COMMIT,"upstream_tree":UPSTREAM_TREE,"upstream_archive_sha256":UPSTREAM_ARCHIVE_SHA256,"overlay_sha":overlay_sha},
+ "historical_evidence":{"evidence_commit":EVIDENCE_COMMIT,"candidate_refs":copy.deepcopy(HISTORICAL_REFS),"pull_request":copy.deepcopy(HISTORICAL_PR),"validation_runs":copy.deepcopy(HISTORICAL_RUNS),"immutable":True},
+ "overlay":{"entries":rows,"policy_digest":hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(",",":")).encode()).hexdigest()},
+ "projection":{"upstream_tuple_count":len(upstream),"upstream_tree_count":sum(x.type=="tree" for x in upstream.values()),"upstream_digest":inventory_digest(upstream),"projected_tuple_count":len(projected),"projected_digest":inventory_digest(projected),"origin_projection":mappings,"projected_manifest":manifest},
+ "gradle_inputs":{"known_inventory":copy.deepcopy(KNOWN_INPUTS),"dynamic_inputs":dynamic,"gradle_properties_blob":GRADLE_PROPERTIES_BLOB,"wrapper_distribution_sha256":GRADLE_DISTRIBUTION_SHA256,"wrapper_jar_sha256":GRADLE_WRAPPER_JAR_SHA256},
+ "negative_tests":{"tuples":tuple_negative_tests(),"gradle_properties":gradle_property_negative_tests(),"recovery_scope":recovery_scope_negative_tests()},
+ "invariants":invariants,"isolation":{"sanitized_environment":True,"candidate_workspace":"absent","credential_channels":"absent","runtime_cache_result_channels":"absent","constant_report_path":REPORT_PATH}}
+ validate_report_schema(report); return report
+
+if __name__=="__main__": main()

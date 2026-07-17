@@ -135,37 +135,86 @@ class InputsIsolationAndSchema(unittest.TestCase):
             attacked = dict(clean); attacked[name] = "channel"
             with self.assertRaises(p.Reject): p.validate_environment(attacked)
 
-    def test_one_preflight_fresh_identity_and_budget_invariants(self):
-        runs = {"total_count":1,"workflow_runs":[{"run_attempt":1}]}
-        refs = [{"ref":p.OLD_CANDIDATE_BRANCH,"object":{"sha":p.OLD_CANDIDATE_COMMIT}}]
-        result = p.validate_operational_invariants(runs, refs)
-        self.assertEqual(result["validation_budget"], {"maximum_dispatches":3,"used_for_fresh_identity":0,
-                                                       "required_consecutive_successes":2,"run2_failure_stop":True})
-        attacks = [({"total_count":0,"workflow_runs":[]}, refs),
-                   ({"total_count":2,"workflow_runs":[{"run_attempt":1},{"run_attempt":1}]}, refs),
-                   ({"total_count":1,"workflow_runs":[{"run_attempt":2}]}, refs),
-                   (runs, refs + [{"ref":"refs/heads/candidate/antennapod-fresh","object":{"sha":"f"*40}}])]
-        for run_attack, ref_attack in attacks:
-            with self.assertRaises(p.Reject): p.validate_operational_invariants(run_attack, ref_attack)
+def _strict_tuple_attacks(self):
+ expected={"regular-100755-to-100644","regular-100644-to-100755","regular-to-symlink","symlink-to-regular",
+           "regular-to-gitlink","gitlink-to-regular","symlink-target-identity","gitlink-commit-identity",
+           "symlink-to-gitlink","gitlink-to-symlink"}
+ self.assertEqual(p.tuple_negative_tests(),{name:"rejected" for name in expected})
 
-    def test_report_schema_and_constant_path_are_closed(self):
-        row = {"origin":{"path":"x","type":"tree","mode":"040000","identity":"0"*40},
-               "projected":{"path":"x","type":"tree","mode":"040000","identity":"1"*40}}
-        origin_projection = [copy.deepcopy(row) for _ in range(p.PINNED_TUPLE_COUNT)]
-        report = {"schema":p.REPORT_SCHEMA,"status":"pass",
-                  "identity":{"upstream_commit":"x","upstream_tree":"x","upstream_archive_sha256":"x","overlay_sha":"x"},
-                  "historical_evidence":{"evidence_commit":"x","old_candidate_commit":"x","old_candidate_branch":"x","pull_request":1,"immutable":True},
-                  "overlay":{"entries":[],"policy_digest":"x"},
-                  "projection":{"upstream_tuple_count":2028,"upstream_tree_count":745,"upstream_digest":"x","projected_tuple_count":1,"projected_digest":"x","origin_projection":origin_projection},
-                  "gradle_inputs":{"known_inventory":p.KNOWN_INPUTS,"dynamic_inputs":{"literal_environment_and_properties":[],"static_root_config":[],"unresolved":[]},"gradle_properties_blob":"x","wrapper_distribution_sha256":"x","wrapper_jar_sha256":"x"},
-                  "negative_tests":{"tuples":p.tuple_negative_tests(),"gradle_properties":p.gradle_property_negative_tests(),"recovery_scope":p.recovery_scope_negative_tests()},
-                  "invariants":{"one_preflight":{"maximum":1,"observed":1,"run_attempt":1},
-                                "fresh_identity":{"must_be_created_after_preflight":True,"present":False,"allowed_historical_identity":p.OLD_CANDIDATE_COMMIT},
-                                "validation_budget":{"maximum_dispatches":3,"used_for_fresh_identity":0,"required_consecutive_successes":2,"run2_failure_stop":True}},
-                  "isolation":{"sanitized_environment":True,"candidate_workspace":"absent","credential_channels":"absent","runtime_cache_result_channels":"absent","constant_report_path":p.REPORT_PATH}}
-        p.validate_report_schema(report)
-        self.assertEqual(p.REPORT_PATH, "/tmp/podcast-clips-recovery-preflight/report.json")
-        attacked = dict(report); attacked["unexpected"] = True
-        with self.assertRaises(p.Reject): p.validate_report_schema(attacked)
+def _strict_property_attacks(self):
+ expected={"androidx-omission","androidx-value","nontransitive-omission","nontransitive-value","jvmargs-omission","jvmargs-value"}
+ self.assertEqual(p.gradle_property_negative_tests(),{name:"rejected" for name in expected})
+ p.validate_gradle_properties({"gradle.properties":p.GRADLE_PROPERTIES})
 
-if __name__ == "__main__": unittest.main(verbosity=2)
+def _run_fixture(head="a"*40):
+ return {"total_count":1,"workflow_runs":[{"run_attempt":1,"head_sha":head,"event":"workflow_dispatch",
+          "path":p.PREFLIGHT_WORKFLOW_PATH,"name":p.PREFLIGHT_WORKFLOW_NAME}]}
+def _ref_fixture():
+ return [{"ref":ref,"object":{"sha":sha}} for ref,sha in p.HISTORICAL_REFS.items()]
+
+def _strict_invariants(self):
+ result=p.validate_operational_invariants(_run_fixture(),_ref_fixture())
+ self.assertEqual(result["one_preflight"]["head_sha"],"a"*40)
+ self.assertEqual(result["fresh_identity"]["allowed_historical_refs"],p.HISTORICAL_REFS)
+ attacks=[]
+ bad_runs=copy.deepcopy(_run_fixture()); bad_runs["workflow_runs"][0]["head_sha"]="short"; attacks.append((bad_runs,_ref_fixture()))
+ bad_runs=copy.deepcopy(_run_fixture()); bad_runs["workflow_runs"][0]["event"]="push"; attacks.append((bad_runs,_ref_fixture()))
+ bad_runs=copy.deepcopy(_run_fixture()); bad_runs["workflow_runs"][0]["path"]=".github/workflows/other.yml"; attacks.append((bad_runs,_ref_fixture()))
+ bad_runs=copy.deepcopy(_run_fixture()); bad_runs["workflow_runs"][0]["name"]="Other"; attacks.append((bad_runs,_ref_fixture()))
+ bad_runs=copy.deepcopy(_run_fixture()); bad_runs["workflow_runs"][0]["run_attempt"]=2; attacks.append((bad_runs,_ref_fixture()))
+ added=_ref_fixture()+[{"ref":"refs/heads/candidate/antennapod-fresh","object":{"sha":"f"*40}}]; attacks.append((_run_fixture(),added))
+ mutated=_ref_fixture(); mutated[0]["object"]["sha"]="0"*40; attacks.append((_run_fixture(),mutated))
+ removed=_ref_fixture()[1:]; attacks.append((_run_fixture(),removed))
+ for run_payload,refs_payload in attacks:
+  with self.assertRaises(p.Reject): p.validate_operational_invariants(run_payload,refs_payload)
+
+def _valid_strict_report():
+ upstream=full_inventory(); projected,mappings=p.project_tree(upstream,overlay(),COMMON)
+ manifest=p.report_manifest(projected); rows=p._expected_overlay_rows(); overlay_digest=hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+ origin_digest=p.inventory_digest(upstream); overlay_sha="a"*40
+ dynamic=p.scan_dynamic_inputs(known_contents(),upstream)
+ report={"schema":p.REPORT_SCHEMA,"status":"pass",
+ "identity":{"upstream_commit":p.UPSTREAM_COMMIT,"upstream_tree":p.UPSTREAM_TREE,"upstream_archive_sha256":p.UPSTREAM_ARCHIVE_SHA256,"overlay_sha":overlay_sha},
+ "historical_evidence":{"evidence_commit":p.EVIDENCE_COMMIT,"candidate_refs":copy.deepcopy(p.HISTORICAL_REFS),"pull_request":copy.deepcopy(p.HISTORICAL_PR),"validation_runs":copy.deepcopy(p.HISTORICAL_RUNS),"immutable":True},
+ "overlay":{"entries":rows,"policy_digest":overlay_digest},
+ "projection":{"upstream_tuple_count":2028,"upstream_tree_count":745,"upstream_digest":origin_digest,"projected_tuple_count":len(projected),"projected_digest":p.inventory_digest(projected),"origin_projection":mappings,"projected_manifest":manifest},
+ "gradle_inputs":{"known_inventory":copy.deepcopy(p.KNOWN_INPUTS),"dynamic_inputs":dynamic,"gradle_properties_blob":p.GRADLE_PROPERTIES_BLOB,"wrapper_distribution_sha256":p.GRADLE_DISTRIBUTION_SHA256,"wrapper_jar_sha256":p.GRADLE_WRAPPER_JAR_SHA256},
+ "negative_tests":{"tuples":p.tuple_negative_tests(),"gradle_properties":p.gradle_property_negative_tests(),"recovery_scope":p.recovery_scope_negative_tests()},
+ "invariants":p.validate_operational_invariants(_run_fixture(overlay_sha),_ref_fixture()),
+ "isolation":{"sanitized_environment":True,"candidate_workspace":"absent","credential_channels":"absent","runtime_cache_result_channels":"absent","constant_report_path":p.REPORT_PATH}}
+ return report,origin_digest
+
+def _strict_report_tamper_rejection(self):
+ self.assertEqual(p.PINNED_TUPLE_DIGEST,"b05cc9e64c2285efab776bf05a6de65ba8396e0de8a6329c00a9a23ba3997aee")
+ report,synthetic_digest=_valid_strict_report(); production=p.PINNED_TUPLE_DIGEST; p.PINNED_TUPLE_DIGEST=synthetic_digest
+ try:
+  p.validate_report_schema(report)
+  attacks=[]
+  def attack(path,value):
+   item=copy.deepcopy(report); target=item
+   for key in path[:-1]: target=target[key]
+   target[path[-1]]=value; attacks.append(item)
+  attack(("identity","upstream_commit"),"0"*40)
+  attack(("historical_evidence","immutable"),False)
+  item=copy.deepcopy(report); item["historical_evidence"]["candidate_refs"].pop(next(iter(p.HISTORICAL_REFS))); attacks.append(item)
+  item=copy.deepcopy(report); item["historical_evidence"]["validation_runs"]["29562294514"]["conclusion"]="success"; attacks.append(item)
+  item=copy.deepcopy(report); item["overlay"]["entries"][0]["identity"]="0"*40; attacks.append(item)
+  attack(("overlay","policy_digest"),"0"*64)
+  attack(("gradle_inputs","gradle_properties_blob"),"0"*40)
+  item=copy.deepcopy(report); item["gradle_inputs"]["dynamic_inputs"]["unresolved"]=["unknown"]; attacks.append(item)
+  item=copy.deepcopy(report); item["negative_tests"]["tuples"]["symlink-to-gitlink"]="accepted"; attacks.append(item)
+  attack(("invariants","one_preflight","event"),"push")
+  attack(("invariants","one_preflight","head_sha"),"b"*40)
+  attack(("isolation","credential_channels"),"present")
+  attack(("projection","projected_digest"),"0"*64)
+  item=copy.deepcopy(report); item["projection"]["projected_manifest"][0]["identity"]="0"*40; attacks.append(item)
+  for index,item in enumerate(attacks):
+   with self.subTest(tamper=index),self.assertRaises(p.Reject): p.validate_report_schema(item)
+ finally: p.PINNED_TUPLE_DIGEST=production
+
+AttackMatrix.test_explicit_mode_type_target_and_gitlink_attacks=_strict_tuple_attacks
+AttackMatrix.test_independent_androidx_and_nontransitive_attacks=_strict_property_attacks
+InputsIsolationAndSchema.test_one_preflight_fresh_identity_and_budget_invariants=_strict_invariants
+InputsIsolationAndSchema.test_report_schema_and_constant_path_are_closed=_strict_report_tamper_rejection
+
+if __name__=="__main__": unittest.main(verbosity=2)
