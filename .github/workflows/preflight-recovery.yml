@@ -1,0 +1,147 @@
+name: Story 1 recovery preflight
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: story1-recovery-preflight-once
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  preflight:
+    name: trusted non-executing recovery preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions: {}
+    steps:
+      - name: Prove this is the sole immutable preflight attempt
+        shell: bash
+        run: |
+          env -i \
+            PATH='/usr/bin:/bin' \
+            HOME='/tmp/podcast-clips-preflight-guard-home' \
+            LANG='C.UTF-8' \
+            LC_ALL='C.UTF-8' \
+            CONTROL_SHA='${{ github.workflow_sha }}' \
+            HEAD_SHA='${{ github.sha }}' \
+            RUN_ID='${{ github.run_id }}' \
+            RUN_ATTEMPT='${{ github.run_attempt }}' \
+            EVENT_NAME='${{ github.event_name }}' \
+            REF_NAME='${{ github.ref }}' \
+            REPOSITORY='${{ github.repository }}' \
+            python3 - <<'PY'
+          import json, os, re, time, urllib.request
+          def public_json(url):
+              request = urllib.request.Request(url, headers={"User-Agent": "podcast-clips-preflight-guard/1"})
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+          sha = os.environ["CONTROL_SHA"]
+          if not re.fullmatch(r"[0-9a-f]{40}", sha) or os.environ["HEAD_SHA"] != sha:
+              raise SystemExit("workflow/head SHA mismatch")
+          if os.environ["RUN_ATTEMPT"] != "1" or os.environ["EVENT_NAME"] != "workflow_dispatch":
+              raise SystemExit("rerun or non-dispatch event rejected")
+          if os.environ["REF_NAME"] != "refs/heads/main":
+              raise SystemExit("preflight is main-only")
+          api = f"https://api.github.com/repos/{os.environ['REPOSITORY']}"
+          if public_json(f"{api}/branches/main")["commit"]["sha"] != sha:
+              raise SystemExit("main moved away from the immutable workflow SHA")
+          current = None
+          for _ in range(6):
+              payload = public_json(f"{api}/actions/workflows/preflight-recovery.yml/runs?event=workflow_dispatch&per_page=100")
+              runs = payload.get("workflow_runs", [])
+              if payload.get("total_count") == 1 and len(runs) == 1:
+                  current = runs[0]
+                  break
+              time.sleep(2)
+          expected = {"id": int(os.environ["RUN_ID"]), "run_attempt": 1, "event": "workflow_dispatch", "head_sha": sha,
+                      "path": ".github/workflows/preflight-recovery.yml", "name": "Story 1 recovery preflight"}
+          if current is None or any(current.get(key) != value for key, value in expected.items()):
+              raise SystemExit("sole preflight identity could not be proved")
+          PY
+
+      - name: Fetch and verify exact trusted controls without checkout
+        shell: bash
+        run: |
+          env -i \
+            PATH='/usr/bin:/bin' \
+            HOME='/tmp/podcast-clips-preflight-fetch-home' \
+            LANG='C.UTF-8' \
+            LC_ALL='C.UTF-8' \
+            CONTROL_SHA='${{ github.workflow_sha }}' \
+            REPOSITORY='${{ github.repository }}' \
+            python3 - <<'PY'
+          import hashlib, os, re, urllib.request
+          root = "/tmp/podcast-clips-recovery-controls"
+          os.mkdir(root, 0o700)
+          expected = {
+              "scripts/ci/recovery_preflight.py": "b19ea9d4e29d6bba34d39e84df17c270fe22e28c",
+              "scripts/ci/test_recovery_preflight.py": "8a10a5932874692b2583df40a1cf6a1fff3bba31",
+              "scripts/ci/validate_preflight_report.py": "fa134c8ebb0a8115bc093e24fc96a0051fa460ed",
+          }
+          paths = [*expected, ".github/workflows/preflight-recovery.yml"]
+          sha = os.environ["CONTROL_SHA"]
+          if not re.fullmatch(r"[0-9a-f]{40}", sha):
+              raise SystemExit("invalid control SHA")
+          for path in paths:
+              url = f"https://raw.githubusercontent.com/{os.environ['REPOSITORY']}/{sha}/{path}"
+              request = urllib.request.Request(url, headers={"User-Agent": "podcast-clips-control-fetch/1"})
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  data = response.read(2 * 1024 * 1024 + 1)
+              if not data or len(data) > 2 * 1024 * 1024:
+                  raise SystemExit(f"trusted control outside size bound: {path}")
+              identity = hashlib.sha1(f"blob {len(data)}\0".encode() + data).hexdigest()
+              if path in expected and identity != expected[path]:
+                  raise SystemExit(f"trusted control identity mismatch: {path}")
+              destination = os.path.join(root, os.path.basename(path))
+              descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+              with os.fdopen(descriptor, "wb") as handle:
+                  handle.write(data)
+          workflow = open(os.path.join(root, "preflight-recovery.yml"), encoding="utf-8").read()
+          if workflow.count("permissions: " + "{}") != 2:
+              raise SystemExit("workflow permissions are not empty at both scopes")
+          uses = [line.strip() for line in workflow.splitlines() if line.strip().startswith("uses" + ":")]
+          pinned = "uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2"
+          if uses != [pinned]:
+              raise SystemExit("unexpected or mutable action reference")
+          forbidden = ["actions/" + "checkout", "GITHUB" + "_TOKEN", "GH" + "_TOKEN"]
+          if any(value in workflow for value in forbidden):
+              raise SystemExit("checkout or repository credential channel present")
+          required = ["on" + ":\n  workflow_dispatch:", "group" + ": story1-recovery-preflight-once",
+                      "path" + ": /tmp/podcast-clips-recovery-preflight/report.json", "retention-" + "days: 1"]
+          if any(value not in workflow for value in required):
+              raise SystemExit("static workflow contract incomplete")
+          PY
+
+      - name: Run immutable stdlib control tests
+        shell: bash
+        run: |
+          env -i PATH='/usr/bin:/bin' HOME='/tmp/podcast-clips-preflight-test-home' LANG='C.UTF-8' LC_ALL='C.UTF-8' \
+            PYTHONPATH='/tmp/podcast-clips-recovery-controls' \
+            python3 -B /tmp/podcast-clips-recovery-controls/test_recovery_preflight.py
+          env -i PATH='/usr/bin:/bin' HOME='/tmp/podcast-clips-preflight-validator-test-home' LANG='C.UTF-8' LC_ALL='C.UTF-8' \
+            python3 -B /tmp/podcast-clips-recovery-controls/validate_preflight_report.py --self-test
+
+      - name: Run sanitized non-executing parser
+        shell: bash
+        run: |
+          env -i PATH='/usr/bin:/bin' HOME='/tmp/podcast-clips-preflight-parser-home' LANG='C.UTF-8' LC_ALL='C.UTF-8' \
+            python3 -B /tmp/podcast-clips-recovery-controls/recovery_preflight.py \
+              --overlay-sha '${{ github.workflow_sha }}' >/dev/null
+
+      - name: Validate the closed report before upload
+        shell: bash
+        run: |
+          env -i PATH='/usr/bin:/bin' HOME='/tmp/podcast-clips-preflight-validator-home' LANG='C.UTF-8' LC_ALL='C.UTF-8' \
+            python3 -B /tmp/podcast-clips-recovery-controls/validate_preflight_report.py \
+              --expected-overlay-sha '${{ github.workflow_sha }}'
+
+      - name: Upload only the validated constant-path report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: story1-recovery-preflight-report
+          path: /tmp/podcast-clips-recovery-preflight/report.json
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 1
