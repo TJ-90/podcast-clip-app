@@ -1,0 +1,95 @@
+{
+  "archive_entry_count": 1279,
+  "bootstrap_overlay_commit": "58d007bb4bf495f035263da5a869849708486336",
+  "candidate": "antennapod",
+  "expanded_regular_bytes": 15797430,
+  "github_commit_verified": true,
+  "import_run_id": "29562160851",
+  "license_blob": "0c780f71ed85dbd7605d1946312e2dc3fb36cf90",
+  "observed_archive_sha256": "99c9d77996595d6d75ed170240d5849ce381931f6d5e726d12e198ff15dae8a2",
+  "quarantined_count": 28,
+  "reserved_upstream_paths": [
+    {
+      "path": ".github/ISSUE_TEMPLATE/bug_report.yml",
+      "upstream_blob": "cedb7b5994517e514e51f9e5830cae5fd1202f90"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/config.yml",
+      "upstream_blob": "b1f495e13a18cf5cc0a60da7953a270a8dd070d3"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/feature_request.yml",
+      "upstream_blob": "6ce0525b840ca198a10be7def8708d096a99a85e"
+    },
+    {
+      "path": ".github/pull_request_template.md",
+      "upstream_blob": "adbca13f111b3f7ce3fe1e1074bb6ab8c943960c"
+    },
+    {
+      "path": ".github/workflows/assign-milestone.yml",
+      "upstream_blob": "cafb6c4e804d2791af125275935c3ffee623941e"
+    },
+    {
+      "path": ".github/workflows/checks.yml",
+      "upstream_blob": "c46a38233945a9cee3045c23fbb2e57c52450525"
+    },
+    {
+      "path": ".github/workflows/close-if-no-reply.yml",
+      "upstream_blob": "ccf9b9faa8fabe9a05b5cb342b19ed56d4682a2b"
+    },
+    {
+      "path": ".github/workflows/copilot-setup-steps.yml",
+      "upstream_blob": "a9adad7b32c8dc1e42aea0f2ba76daa3d2288582"
+    },
+    {
+      "path": ".github/workflows/create-changelog.yml",
+      "upstream_blob": "a21c594ca7299730c5c9383c8f9aca44c3299a0a"
+    },
+    {
+      "path": ".github/workflows/errorPrinter.py",
+      "upstream_blob": "c83b9b3ad4728498fbc86c4210184d16a3bfdced"
+    },
+    {
+      "path": ".github/workflows/issue-comment.yml",
+      "upstream_blob": "43bdc51fa407321a8550b69e96df7cb7cf328f1b"
+    },
+    {
+      "path": ".github/workflows/issue-opened.yml",
+      "upstream_blob": "1330cd5c3a84c6d88e1e89f91fd75ef4e7776814"
+    },
+    {
+      "path": ".github/workflows/pr-conventions.yml",
+      "upstream_blob": "1147ef0f684edc245d055654195652cd2cd20319"
+    },
+    {
+      "path": ".github/workflows/remove-labels-when-issue-gets-closed.yml",
+      "upstream_blob": "0175df440203d1c3b2992015a1b9bdb782f9e680"
+    },
+    {
+      "path": ".github/workflows/review-link-label.yml",
+      "upstream_blob": "fca0ae32dc5c3a99db2ddb2b53d368a674d2737b"
+    },
+    {
+      "path": ".github/workflows/runEmulatorTests.sh",
+      "upstream_blob": "82a43693a7867b698787439999004ab798354c7a"
+    },
+    {
+      "path": "LICENSE",
+      "upstream_blob": "0c780f71ed85dbd7605d1946312e2dc3fb36cf90"
+    },
+    {
+      "path": "README.md",
+      "upstream_blob": "83bd00e36ef2462e0a056227b9a9edc8b0307bf5"
+    }
+  ],
+  "schema": 1,
+  "upstream_commit": "1d2bd1c8f9d3ea46fc777a14d5a035558f07b7f7",
+  "upstream_repository": "https://github.com/AntennaPod/AntennaPod",
+  "upstream_tree": "ebfc8990216aded7ad4ab6d393fa6e0131a69fee",
+  "visible_brand_changes": [
+    {
+      "path": "common.gradle",
+      "reason": "Visible brand follows DESIGN.md Product character and Visual language; upstream credit remains in legal records"
+    }
+  ]
+}

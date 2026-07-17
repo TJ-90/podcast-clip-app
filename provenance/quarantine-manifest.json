@@ -1,0 +1,217 @@
+[
+  {
+    "git_blob_sha1": "e9d641154ce0b37b27ed83f4761cfb4b71665fff",
+    "path": "app/src/free/play",
+    "reason": "symlink quarantined; never materialized",
+    "target": "../main/play"
+  },
+  {
+    "git_blob_sha1": "e9d641154ce0b37b27ed83f4761cfb4b71665fff",
+    "path": "app/src/play/play",
+    "reason": "symlink quarantined; never materialized",
+    "target": "../main/play"
+  },
+  {
+    "git_blob_sha1": "2a64f9d0fc673aa4f81ebacaac15f13df255688a",
+    "path": "ui/preferences/src/main/assets/LICENSE.txt",
+    "reason": "symlink quarantined; never materialized",
+    "target": "../../../../../LICENSE"
+  },
+  {
+    "gitlink_commit": "122c14a36d50f2fd804ea2d9ed780efd2dba9b06",
+    "path": "app/src/main/play",
+    "reason": "submodule gitlink quarantined; content never fetched or materialized"
+  },
+  {
+    "git_blob_sha1": "cedb7b5994517e514e51f9e5830cae5fd1202f90",
+    "mode": "100644",
+    "path": ".github/ISSUE_TEMPLATE/bug_report.yml",
+    "reason": "upstream repository control surface",
+    "sha256": "fc70621874f8ac023e767d9c6f981247d4ce8a6a2dc664562fe2caad564c1003",
+    "size": 2517
+  },
+  {
+    "git_blob_sha1": "b1f495e13a18cf5cc0a60da7953a270a8dd070d3",
+    "mode": "100644",
+    "path": ".github/ISSUE_TEMPLATE/config.yml",
+    "reason": "upstream repository control surface",
+    "sha256": "d850dd29c5213fc6e3b4a06647eb7914d7b78faa601ae35808bc39a58768a88c",
+    "size": 385
+  },
+  {
+    "git_blob_sha1": "6ce0525b840ca198a10be7def8708d096a99a85e",
+    "mode": "100644",
+    "path": ".github/ISSUE_TEMPLATE/feature_request.yml",
+    "reason": "upstream repository control surface",
+    "sha256": "757ae4ab18d42c8007def4ff75ca7dc234aef84fb713500c10ad9b7ba7747ca8",
+    "size": 1916
+  },
+  {
+    "git_blob_sha1": "adbca13f111b3f7ce3fe1e1074bb6ab8c943960c",
+    "mode": "100644",
+    "path": ".github/pull_request_template.md",
+    "reason": "upstream repository control surface",
+    "sha256": "9d0cb300c387d7b1f67f9651cdc247733b9e371abeff1fb8b39106f9586141e1",
+    "size": 1031
+  },
+  {
+    "git_blob_sha1": "cafb6c4e804d2791af125275935c3ffee623941e",
+    "mode": "100644",
+    "path": ".github/workflows/assign-milestone.yml",
+    "reason": "upstream repository control surface",
+    "sha256": "0a75018b64d4a9811b3a56e2044e9f4a3d6fb24559be0b64cd26dfb84a4313e4",
+    "size": 2159
+  },
+  {
+    "git_blob_sha1": "c46a38233945a9cee3045c23fbb2e57c52450525",
+    "mode": "100644",
+    "path": ".github/workflows/checks.yml",
+    "reason": "upstream repository control surface",
+    "sha256": "aee88b69eb9ccbaa3a99b8350236dbfece6c6cdfaa46076a5095eded7e783a5c",
+    "size": 6221
+  },
+  {
+    "git_blob_sha1": "ccf9b9faa8fabe9a05b5cb342b19ed56d4682a2b",
+    "mode": "100644",
+    "path": ".github/workflows/close-if-no-reply.yml",
+    "reason": "upstream repository control surface",
+    "sha256": "8b6ee67eb5e7a2ec6836a9dc9e9772587bb2e8bb38f74094613467b504c95aab",
+    "size": 988
+  },
+  {
+    "git_blob_sha1": "a9adad7b32c8dc1e42aea0f2ba76daa3d2288582",
+    "mode": "100644",
+    "path": ".github/workflows/copilot-setup-steps.yml",
+    "reason": "upstream repository control surface",
+    "sha256": "b65ecf098e00099c38345d524ac4f59d528465afa25736ed3943083b0ae16133",
+    "size": 976
+  },
+  {
+    "git_blob_sha1": "a21c594ca7299730c5c9383c8f9aca44c3299a0a",
+    "mode": "100644",
+    "path": ".github/workflows/create-changelog.yml",
+    "reason": "upstream repository control surface",
+    "sha256": "8f95e2b95c20cc4fe5d89a0f6f299d196625bc26ec731f80577212830b72d8ed",
+    "size": 1195
+  },
+  {
+    "git_blob_sha1": "c83b9b3ad4728498fbc86c4210184d16a3bfdced",
+    "mode": "100644",
+    "path": ".github/workflows/errorPrinter.py",
+    "reason": "upstream repository control surface",
+    "sha256": "8061c45d1adf0d7ac2ab4dbddd06d2a52015d8b720f5381a9a045dae482a8b31",
+    "size": 2485
+  },
+  {
+    "git_blob_sha1": "43bdc51fa407321a8550b69e96df7cb7cf328f1b",
+    "mode": "100644",
+    "path": ".github/workflows/issue-comment.yml",
+    "reason": "upstream repository control surface",
+    "sha256": "d66452928b585f8dc24e59577a8dc710a3b8fd393a7cf9491405494028055afb",
+    "size": 1096
+  },
+  {
+    "git_blob_sha1": "1330cd5c3a84c6d88e1e89f91fd75ef4e7776814",
+    "mode": "100644",
+    "path": ".github/workflows/issue-opened.yml",
+    "reason": "upstream repository control surface",
+    "sha256": "ca7fe5b22a9e27085910efe8945c0a9cd242aeeccbec99b568d30f3b278d5343",
+    "size": 1987
+  },
+  {
+    "git_blob_sha1": "1147ef0f684edc245d055654195652cd2cd20319",
+    "mode": "100644",
+    "path": ".github/workflows/pr-conventions.yml",
+    "reason": "upstream repository control surface",
+    "sha256": "5b6d3e058a2e59e5b9dc4070618484e416588146dde6d939af1395adbb1a314e",
+    "size": 1454
+  },
+  {
+    "git_blob_sha1": "0175df440203d1c3b2992015a1b9bdb782f9e680",
+    "mode": "100644",
+    "path": ".github/workflows/remove-labels-when-issue-gets-closed.yml",
+    "reason": "upstream repository control surface",
+    "sha256": "6a51167f6e1b3ba1ee92f78d737d21a30e9f964f55dc0cb4297b9cefa5b7e642",
+    "size": 1883
+  },
+  {
+    "git_blob_sha1": "fca0ae32dc5c3a99db2ddb2b53d368a674d2737b",
+    "mode": "100644",
+    "path": ".github/workflows/review-link-label.yml",
+    "reason": "upstream repository control surface",
+    "sha256": "25c76a4664636f57d7cd057c81503ad2a6c618be8ab9d5aa753a0dc5bd9dfe99",
+    "size": 744
+  },
+  {
+    "git_blob_sha1": "82a43693a7867b698787439999004ab798354c7a",
+    "mode": "100644",
+    "path": ".github/workflows/runEmulatorTests.sh",
+    "reason": "upstream repository control surface",
+    "sha256": "a3f2d359ea354646c810cf065fb1a9db90108099d1090de3711907e3881137fb",
+    "size": 459
+  },
+  {
+    "git_blob_sha1": "a3d4c3cf256b901fa32d98d80eb19a61b1037bab",
+    "mode": "100644",
+    "path": ".gitmodules",
+    "reason": "active bootstrap/IDE control",
+    "sha256": "8b1ca0f529e5b9547ad2e881cf0407a98b420fa42139d3008a381e30827713e6",
+    "size": 144
+  },
+  {
+    "git_blob_sha1": "bc73fbfd0d24f0468470aaf9338ca64fc20b813f",
+    "mode": "100644",
+    "path": ".idea/codeStyles/Project.xml",
+    "reason": "upstream repository control surface",
+    "sha256": "600e34bc8cc38103892090b951f7af67108d3384e595e0289024c691bae50fd3",
+    "size": 592
+  },
+  {
+    "git_blob_sha1": "79ee123c2b23e069e35ed634d687e17f731cc702",
+    "mode": "100644",
+    "path": ".idea/codeStyles/codeStyleConfig.xml",
+    "reason": "upstream repository control surface",
+    "sha256": "ee546e9441ecbbb5fdd87776dc403e44f3dccb93ebb43828906ed1f47ebb32ed",
+    "size": 142
+  },
+  {
+    "git_blob_sha1": "998bfdea82398e21d1aca1ea86a84c695f7c58e3",
+    "mode": "100644",
+    "path": ".idea/icon.png",
+    "reason": "upstream repository control surface",
+    "sha256": "bf2e2cf9d40d3f10da5d9085ee0f716cb3a3f9b1ff2b7d507fb3e0fa6d3919fb",
+    "size": 23299
+  },
+  {
+    "git_blob_sha1": "0c780f71ed85dbd7605d1946312e2dc3fb36cf90",
+    "mode": "100644",
+    "path": "LICENSE",
+    "reason": "trusted bootstrap path reserved",
+    "sha256": "c2e425267f213f1520d21adcf484569dafc678609525a3e9fc24663c13a1cc38",
+    "size": 36447
+  },
+  {
+    "git_blob_sha1": "83bd00e36ef2462e0a056227b9a9edc8b0307bf5",
+    "mode": "100644",
+    "path": "README.md",
+    "reason": "trusted bootstrap path reserved",
+    "sha256": "733f6014b0ed948bd611a167694578452dc7efbd6c81c6482e42172efa92c21c",
+    "size": 4370
+  },
+  {
+    "git_blob_sha1": "1aa94a4269074199e6ed2c37e8db3e0826030965",
+    "mode": "100755",
+    "path": "gradlew",
+    "reason": "active bootstrap/IDE control",
+    "sha256": "fc977a94723af68aaffa4e5d60496fb4aeed1884b6b19e5e2f2fd7612673313d",
+    "size": 8692
+  },
+  {
+    "git_blob_sha1": "7101f8e4676fcad8adc961e929ea3bcb37b5262f",
+    "mode": "100644",
+    "path": "gradlew.bat",
+    "reason": "active bootstrap/IDE control",
+    "sha256": "bdecf875b6868cbcbd36a1f85eedf0832f358ff28092c5797ed645f7edce77d9",
+    "size": 2918
+  }
+]
