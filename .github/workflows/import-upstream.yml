@@ -1,0 +1,105 @@
+name: Trusted upstream import
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: Pinned candidate to import
+        type: choice
+        required: true
+        options:
+          - podaura
+          - antennapod
+
+concurrency:
+  group: trusted-import-${{ inputs.candidate }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  trusted-import:
+    name: trusted-import
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out only the immutable trusted workflow revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: Prove hostile archives fail closed
+        run: python3 scripts/ci/import_candidate.py --self-test
+
+      - name: Import pinned source as inert data
+        id: import
+        env:
+          CANDIDATE: ${{ inputs.candidate }}
+          CONTROL_SHA: ${{ github.workflow_sha }}
+        run: |
+          python3 scripts/ci/import_candidate.py \
+            --candidate "$CANDIDATE" \
+            --repository . \
+            --control-sha "$CONTROL_SHA"
+
+      - name: Open reviewable candidate pull request
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE: ${{ inputs.candidate }}
+          BRANCH: ${{ steps.import.outputs.branch }}
+          CANDIDATE_SHA: ${{ steps.import.outputs.candidate_sha }}
+          UPSTREAM_TREE: ${{ steps.import.outputs.upstream_tree }}
+          ARCHIVE_SHA256: ${{ steps.import.outputs.archive_sha256 }}
+        run: |
+          body=$(printf '%s\n' \
+            'This PR is a quarantined source-snapshot candidate. Do not merge before admission.' \
+            '' \
+            "Candidate: $CANDIDATE" \
+            "Candidate head: $CANDIDATE_SHA" \
+            "Upstream tree: $UPSTREAM_TREE" \
+            "Observed archive SHA-256: $ARCHIVE_SHA256" \
+            "Bootstrap controls: ${{ github.workflow_sha }}" \
+            '' \
+            'Upstream workflows, hooks, CI/release scripts, IDE tasks, and executable bootstrap controls were not activated. Android execution occurs only in a separate permissions-empty workflow.')
+          response=$(gh api --method POST "repos/${GITHUB_REPOSITORY}/pulls" \
+            -f title="Admit pinned ${CANDIDATE} foundation" \
+            -f head="$BRANCH" \
+            -f base=main \
+            -f body="$body")
+          echo "number=$(jq -r .number <<<"$response")" >> "$GITHUB_OUTPUT"
+          echo "url=$(jq -r .html_url <<<"$response")" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch exact-SHA tokenless validation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.import.outputs.branch }}
+          CANDIDATE: ${{ inputs.candidate }}
+          CANDIDATE_SHA: ${{ steps.import.outputs.candidate_sha }}
+        run: |
+          jq -n \
+            --arg ref "$BRANCH" \
+            --arg candidate "$CANDIDATE" \
+            --arg sha "$CANDIDATE_SHA" \
+            '{ref:$ref,inputs:{candidate:$candidate,candidate_sha:$sha,dispatch_index:"1"}}' \
+            | gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/workflows/validate-candidate.yml/dispatches" --input -
+
+      - name: Publish import summary
+        env:
+          PR_URL: ${{ steps.pr.outputs.url }}
+          CANDIDATE_SHA: ${{ steps.import.outputs.candidate_sha }}
+        run: |
+          {
+            echo '## Trusted import complete'
+            echo
+            echo "- Candidate SHA: \`$CANDIDATE_SHA\`"
+            echo "- Pull request: $PR_URL"
+            echo '- Validation dispatch: 1 of 3 candidate budget'
+          } >> "$GITHUB_STEP_SUMMARY"
+
