@@ -43,6 +43,14 @@ CANDIDATES = {
         "commit": "1d2bd1c8f9d3ea46fc777a14d5a035558f07b7f7",
         "tree": "ebfc8990216aded7ad4ab6d393fa6e0131a69fee",
         "license_blob": "0c780f71ed85dbd7605d1946312e2dc3fb36cf90",
+        "quarantined_symlinks": {
+            "app/src/free/play": {"sha": "e9d641154ce0b37b27ed83f4761cfb4b71665fff", "target": "../main/play"},
+            "app/src/play/play": {"sha": "e9d641154ce0b37b27ed83f4761cfb4b71665fff", "target": "../main/play"},
+            "ui/preferences/src/main/assets/LICENSE.txt": {"sha": "2a64f9d0fc673aa4f81ebacaac15f13df255688a", "target": "../../../../../LICENSE"},
+        },
+        "quarantined_gitlinks": {
+            "app/src/main/play": "122c14a36d50f2fd804ea2d9ed780efd2dba9b06",
+        },
     },
 }
 
@@ -140,17 +148,35 @@ def normalized_relative(raw_name: str, root: str | None) -> tuple[str, str]:
     return discovered_root, rel
 
 
-def preflight(archive: tarfile.TarFile) -> list[Entry]:
+def preflight(
+    archive: tarfile.TarFile,
+    allowed_symlinks: dict[str, dict] | None = None,
+) -> tuple[list[Entry], list[dict]]:
+    allowed_symlinks = allowed_symlinks or {}
     members = archive.getmembers()
     if len(members) > MAX_ENTRIES:
         raise Reject("archive entry count exceeds limit")
     entries: list[Entry] = []
+    quarantined_symlinks: list[dict] = []
     seen: dict[str, str] = {}
     root: str | None = None
     total = 0
     for member in members:
         root, rel = normalized_relative(member.name, root)
-        if member.issym() or member.islnk() or member.isdev() or member.isfifo():
+        if member.issym():
+            expected = allowed_symlinks.get(rel)
+            target = member.linkname
+            if (
+                expected is None
+                or target != expected["target"]
+                or github_blob_sha(target.encode("utf-8")) != expected["sha"]
+            ):
+                raise Reject(f"unapproved or changed symlink rejected: {member.name!r}")
+            quarantined_symlinks.append(
+                {"path": rel, "git_blob_sha1": expected["sha"], "target": target, "reason": "symlink quarantined; never materialized"}
+            )
+            continue
+        if member.islnk() or member.isdev() or member.isfifo():
             raise Reject(f"link/special entry rejected: {member.name!r}")
         if not (member.isdir() or member.isfile()):
             raise Reject(f"unsupported tar entry rejected: {member.name!r}")
@@ -170,7 +196,9 @@ def preflight(archive: tarfile.TarFile) -> list[Entry]:
             if total > MAX_TOTAL:
                 raise Reject("expanded archive exceeds 4 GiB")
             entries.append(Entry(member.name, rel, member.size, member.mode & 0o777, member))
-    return entries
+    if set(allowed_symlinks) != {item["path"] for item in quarantined_symlinks}:
+        raise Reject("approved symlink inventory does not match the archive")
+    return entries, quarantined_symlinks
 
 
 def github_blob_sha(data: bytes) -> str:
@@ -182,9 +210,10 @@ def validate_and_extract(
     archive_path: Path,
     github_files: dict[str, dict],
     destination: Path,
-) -> list[dict]:
+    allowed_symlinks: dict[str, dict] | None = None,
+) -> tuple[list[dict], list[dict]]:
     with tarfile.open(archive_path, mode="r:*") as archive:
-        entries = preflight(archive)
+        entries, quarantined_symlinks = preflight(archive, allowed_symlinks)
         archive_paths = {entry.path for entry in entries}
         github_paths = set(github_files)
         if archive_paths != github_paths:
@@ -223,14 +252,14 @@ def validate_and_extract(
                     "mode": expected["mode"],
                 }
             )
-    return manifest
+    return manifest, quarantined_symlinks
 
 
 def is_quarantined(path: str, executable: bool) -> tuple[bool, str]:
     folded = path.casefold()
-    if folded.startswith((".github/", ".gitlab/", ".circleci/", ".githooks/", ".hooks/")):
+    if folded.startswith((".github/", ".gitlab/", ".circleci/", ".githooks/", ".hooks/", ".idea/", ".vscode/", "fastlane/")):
         return True, "upstream repository control surface"
-    if folded in {"jenkinsfile", "gradlew", "gradlew.bat", ".vscode/tasks.json", ".vscode/launch.json"}:
+    if folded in {".gitmodules", "jenkinsfile", "gradlew", "gradlew.bat", ".vscode/tasks.json", ".vscode/launch.json"}:
         return True, "active bootstrap/IDE control"
     if re.search(r"(^|/)(ci|release|scripts/(ci|release))(/|$)", folded):
         return True, "CI/release script"
@@ -322,7 +351,8 @@ def run_self_test() -> None:
         return tarfile.open(fileobj=stream, mode="r:")
 
     with archive_with([("ok.txt", b"ok", "file")]) as valid:
-        assert [entry.path for entry in preflight(valid)] == ["ok.txt"]
+        entries, symlinks = preflight(valid)
+        assert [entry.path for entry in entries] == ["ok.txt"] and not symlinks
     hostile = [
         [("../escape", b"x", "file")],
         [(".git/config", b"x", "file")],
@@ -355,14 +385,22 @@ def import_candidate(args: argparse.Namespace) -> None:
     )
     if tree_meta.get("truncated"):
         raise Reject("GitHub recursive tree is truncated")
+    approved_gitlinks = config.get("quarantined_gitlinks", {})
     non_blobs = [item for item in tree_meta["tree"] if item["type"] not in {"blob", "tree"}]
-    if non_blobs:
-        raise Reject(f"submodule/unknown tree entries are not admissible: {non_blobs[:3]}")
+    observed_gitlinks = {item["path"]: item["sha"] for item in non_blobs if item["type"] == "commit"}
+    if observed_gitlinks != approved_gitlinks or len(non_blobs) != len(observed_gitlinks):
+        raise Reject(f"unapproved submodule/unknown tree entries: {non_blobs[:3]}")
+    approved_symlinks = config.get("quarantined_symlinks", {})
     github_files = {
         item["path"]: {"sha": item["sha"], "size": item.get("size", 0), "mode": item["mode"]}
         for item in tree_meta["tree"]
-        if item["type"] == "blob"
+        if item["type"] == "blob" and item["mode"] in {"100644", "100755"}
     }
+    observed_symlinks = {
+        item["path"]: item["sha"] for item in tree_meta["tree"] if item["type"] == "blob" and item["mode"] == "120000"
+    }
+    if observed_symlinks != {path: value["sha"] for path, value in approved_symlinks.items()}:
+        raise Reject("approved symlink inventory does not match GitHub tree metadata")
     license_entry = github_files.get("LICENSE")
     if not license_entry or (config["license_blob"] and license_entry["sha"] != config["license_blob"]):
         raise Reject("pinned GPL license blob is absent or changed")
@@ -378,9 +416,15 @@ def import_candidate(args: argparse.Namespace) -> None:
         archive_sha256 = download_bounded(
             f"https://codeload.github.com/{owner}/{repo}/tar.gz/{commit}", archive_path
         )
-        manifest = validate_and_extract(archive_path, github_files, extracted)
+        manifest, quarantined_symlinks = validate_and_extract(
+            archive_path, github_files, extracted, approved_symlinks
+        )
 
-        quarantine: list[dict] = []
+        quarantine: list[dict] = list(quarantined_symlinks)
+        quarantine.extend(
+            {"path": path, "gitlink_commit": sha, "reason": "submodule gitlink quarantined; content never fetched or materialized"}
+            for path, sha in sorted(approved_gitlinks.items())
+        )
         reserved: list[dict] = []
         manifest_by_path = {item["path"]: item for item in manifest}
         for item in manifest:
