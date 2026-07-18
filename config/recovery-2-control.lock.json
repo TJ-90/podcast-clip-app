@@ -1,0 +1,65 @@
+{
+  "schema": "podcast-clips/story1-recovery-2-control-lock/v1",
+  "authorization": {
+    "active_goal_continuation": true,
+    "adr_sha256": "0645e92eecb4336ef03cd712c7845cc460bc264594564cd60611b5b8b9c6357d",
+    "test_addendum_sha256": "1366f23b876662a20107523d028b0324e114a866250839f353ccbab01ca53511",
+    "supersedes": "G009 no-corrected-preflight constraint only"
+  },
+  "parent": "c43ddf3409ea0ea793982f07926ce1e1a6925c82",
+  "allowed_changes": [
+    {"path": ".github/workflows/preflight-recovery-2.yml", "operation": "add", "category": "one-shot-workflow"},
+    {"path": "UPSTREAM.md", "operation": "modify", "category": "report-metadata"},
+    {"path": "config/recovery-2-control.lock.json", "operation": "add", "category": "lock"},
+    {"path": "config/recovery-preflight-report-v2.schema.json", "operation": "add", "category": "schema"},
+    {"path": "docs/base-selection-report.md", "operation": "modify", "category": "report-metadata"},
+    {"path": "scripts/ci/recovery_preflight.py", "operation": "modify", "category": "resolver-report"},
+    {"path": "scripts/ci/test_recovery_preflight.py", "operation": "modify", "category": "focused-tests"},
+    {"path": "scripts/ci/validate_preflight_report.py", "operation": "modify", "category": "schema-validator"}
+  ],
+  "controls": {
+    "scripts/ci/recovery_preflight.py": "ddb06661926bdd4b1242495bd745a9fac1023330",
+    "scripts/ci/test_recovery_preflight.py": "cb133590469f1667013bea74730caa7f07fbcd29",
+    "scripts/ci/validate_preflight_report.py": "3fab41a0ade50f8b88af79081740378743c0c1d4",
+    "config/recovery-preflight-report-v2.schema.json": "41ebc6875851ad6259cf3799b470f792798a7a65"
+  },
+  "workflow": {
+    "path": ".github/workflows/preflight-recovery-2.yml",
+    "name": "Recovery 2 — one-shot trusted preflight",
+    "trigger": "workflow_dispatch",
+    "permissions": {}
+  },
+  "report": {
+    "schema": "podcast-clips/story1-recovery-preflight/v2",
+    "path": "/tmp/podcast-clips-recovery-2-preflight/report-v2.json"
+  },
+  "resolver": {
+    "version": 2,
+    "semantics": "declaring-relative-posix-lexical",
+    "max_include_depth": 32,
+    "realpath": false,
+    "follow_symlinks": false,
+    "fetch_gitlinks": false
+  },
+  "historical": {
+    "g001": "failed-attempt-1",
+    "g009": "failed-attempt-1",
+    "g002": "pending",
+    "evidence_commit": "37593a4217bd442d407d8b0f63d7fcb2fa10f069",
+    "terminal_report_commit": "c43ddf3409ea0ea793982f07926ce1e1a6925c82",
+    "legacy_workflow_id": 315057380,
+    "legacy_run_id": 29575201182,
+    "legacy_control_sha": "fc0ed383c0f4e1cf527f88d0ac3033973a379a4e",
+    "legacy_artifacts": 0
+  },
+  "gates": {
+    "upstream_commit": "1d2bd1c8f9d3ea46fc777a14d5a035558f07b7f7",
+    "upstream_tree": "ebfc8990216aded7ad4ab6d393fa6e0131a69fee",
+    "archive_sha256": "99c9d77996595d6d75ed170240d5849ce381931f6d5e726d12e198ff15dae8a2",
+    "candidate_max_dispatches": 3,
+    "required_consecutive_successes": 2,
+    "critical_gap_budget": 0,
+    "max_minutes": 25,
+    "run2_failure_stop": true
+  }
+}

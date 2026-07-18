@@ -895,5 +895,751 @@ def run_preflight(overlay_sha):
  "negative_tests":{"tuples":tuple_negative_tests(),"gradle_properties":gradle_property_negative_tests(),"recovery_scope":recovery_scope_negative_tests()},
  "invariants":invariants,"isolation":{"sanitized_environment":True,"candidate_workspace":"absent","credential_channels":"absent","runtime_cache_result_channels":"absent","constant_report_path":REPORT_PATH}}
  validate_report_schema(report); return report
+# --- ADR-003 Recovery-2: declaring-relative lexical resolver and v2 report. ---
+from datetime import datetime, timezone
 
+R2_REPORT_SCHEMA = "podcast-clips/story1-recovery-preflight/v2"
+R2_REPORT_PATH = "/tmp/podcast-clips-recovery-2-preflight/report-v2.json"
+R2_LOCK_SCHEMA = "podcast-clips/story1-recovery-2-control-lock/v1"
+R2_WORKFLOW_PATH = ".github/workflows/preflight-recovery-2.yml"
+R2_WORKFLOW_NAME = "Recovery 2 — one-shot trusted preflight"
+R2_PARENT = "c43ddf3409ea0ea793982f07926ce1e1a6925c82"
+R2_ADR_SHA256 = "0645e92eecb4336ef03cd712c7845cc460bc264594564cd60611b5b8b9c6357d"
+R2_TEST_ADDENDUM_SHA256 = "1366f23b876662a20107523d028b0324e114a866250839f353ccbab01ca53511"
+R2_MAX_INCLUDE_DEPTH = 32
+LEGACY_PREFLIGHT_ID = 315057380
+LEGACY_PREFLIGHT_RUN = 29575201182
+LEGACY_PREFLIGHT_CONTROL = "fc0ed383c0f4e1cf527f88d0ac3033973a379a4e"
+LEGACY_PREFLIGHT_BLOB = "06008a439355c8be6d657a92c244e03ba27afdaa"
+TERMINAL_REPORT_COMMIT = R2_PARENT
+
+R2_ALLOWED_CHANGES = {
+    "scripts/ci/recovery_preflight.py": ("modify", "resolver-report"),
+    "scripts/ci/test_recovery_preflight.py": ("modify", "focused-tests"),
+    "scripts/ci/validate_preflight_report.py": ("modify", "schema-validator"),
+    "config/recovery-preflight-report-v2.schema.json": ("add", "schema"),
+    "config/recovery-2-control.lock.json": ("add", "lock"),
+    R2_WORKFLOW_PATH: ("add", "one-shot-workflow"),
+    "UPSTREAM.md": ("modify", "report-metadata"),
+    "docs/base-selection-report.md": ("modify", "report-metadata"),
+}
+
+R2_VALID_CASES = (
+    "VALID-01", "VALID-02", "VALID-03", "VALID-04", "VALID-05",
+    "VALID-06", "VALID-07", "VALID-08", "VALID-09", "VALID-10",
+)
+R2_HOSTILE_CASES = tuple(f"HOST-{index:02d}" for index in range(1, 37))
+R2_DECLARE_CASES = tuple(f"DECLARE-{index:02d}" for index in range(1, 11))
+R2_RECURSION_CASES = ("CYCLE-01", "CYCLE-02", "CYCLE-03", "CYCLE-04",
+                      "DEPTH-01", "DEPTH-02", "DEPTH-03", "DEPTH-04", "DEPTH-05")
+
+_R2_STATIC_ROOT = re.compile(
+    r"apply\s+from\s*:\s*(?P<quote>['\"])(?P<path>[^'\"]*)(?P=quote)(?P<tail>[^\r\n]*)"
+)
+_R2_URI_OR_DRIVE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+_R2_LAST_RESOLVER = {"edges": [], "max_depth": 0, "cycles": [], "unresolved": []}
+
+def _r2_tuple(entry: GitEntry) -> dict[str, str]:
+    return {"path": entry.path, "type": entry.type, "mode": entry.mode, "identity": entry.identity}
+
+def _r2_regular(entries: Mapping[str, GitEntry], path: str, role: str) -> GitEntry:
+    try:
+        canonical = normalize_path(path)
+    except Reject:
+        raise Reject(f"{role} path is not canonical") from None
+    folded = unicodedata.normalize("NFC", canonical).casefold()
+    matches = [
+        candidate for candidate in entries
+        if unicodedata.normalize("NFC", candidate).casefold() == folded
+    ]
+    if matches != [canonical]:
+        if matches:
+            raise Reject(f"{role} path has case/Unicode ambiguity")
+        raise Reject(f"{role} path is missing")
+    entry = entries[canonical]
+    if entry.path != canonical or entry.type != "blob" or entry.mode not in {"100644", "100755"}:
+        raise Reject(f"{role} is not an exact pinned regular blob")
+    if not re.fullmatch(r"[0-9a-f]{40}", entry.identity):
+        raise Reject(f"{role} blob identity is invalid")
+    return entry
+
+def resolve_static_literal(
+    declaring_path: str,
+    literal: str,
+    entries: Mapping[str, GitEntry],
+    depth: int = 0,
+) -> dict[str, object]:
+    declaring = _r2_regular(entries, declaring_path, "declaring entry")
+    if type(literal) is not str or not literal:
+        raise Reject("static Gradle literal is empty")
+    if unicodedata.normalize("NFC", literal) != literal:
+        raise Reject("static Gradle literal is non-NFC")
+    if "\0" in literal:
+        raise Reject("static Gradle literal contains NUL")
+    if "\\" in literal:
+        raise Reject("static Gradle literal contains backslash/escape ambiguity")
+    if literal.startswith(("/", "//")):
+        raise Reject("static Gradle literal is absolute/UNC")
+    if _R2_URI_OR_DRIVE.match(literal):
+        raise Reject("static Gradle literal is URI/drive ambiguous")
+    if "$" in literal:
+        raise Reject("static Gradle literal is interpolated")
+    if any(mark in literal for mark in ("?", "#", "'", '"')):
+        raise Reject("static Gradle literal is query/quote ambiguous")
+    components = literal.split("/")
+    if any(component in {"", "."} for component in components):
+        raise Reject("static Gradle literal has empty/dot component")
+    base = declaring.path.split("/")[:-1]
+    for component in components:
+        if component == "..":
+            if not base:
+                raise Reject("static Gradle literal escapes repository root")
+            base.pop()
+        else:
+            if unicodedata.normalize("NFC", component) != component:
+                raise Reject("static Gradle component is non-NFC")
+            base.append(component)
+    if not base:
+        raise Reject("static Gradle target is empty")
+    normalized = "/".join(base)
+    target = _r2_regular(entries, normalized, "target entry")
+    if depth < 0 or depth > R2_MAX_INCLUDE_DEPTH:
+        raise Reject("static include depth exceeds bound")
+    return {
+        "declaring": _r2_tuple(declaring),
+        "literal": literal,
+        "normalized_target": normalized,
+        "target": _r2_tuple(target),
+        "depth": depth,
+    }
+
+def scan_static_graph(
+    contents: Mapping[str, bytes],
+    entries: Mapping[str, GitEntry],
+    roots: Iterable[str] | None = None,
+    loader=None,
+) -> dict[str, object]:
+    cache = dict(contents)
+    initial = sorted(cache if roots is None else roots)
+    completed: set[str] = set()
+    active: list[str] = []
+    edges: list[dict[str, object]] = []
+    declarations: list[dict[str, str]] = []
+    max_depth = 0
+
+    def load_target(path: str) -> bytes:
+        if path in cache:
+            return cache[path]
+        callback = loader
+        if callback is None:
+            callback = lambda value: _public_bytes(
+                f"https://raw.githubusercontent.com/{UPSTREAM_REPOSITORY}/{UPSTREAM_COMMIT}/{value}"
+            )
+        data = callback(path)
+        if type(data) is not bytes or git_blob_sha(data) != _r2_regular(entries, path, "loaded target").identity:
+            raise Reject(f"loaded target bytes do not match pinned blob: {path}")
+        cache[path] = data
+        return data
+
+    def visit(path: str, depth: int) -> None:
+        nonlocal max_depth
+        if depth > R2_MAX_INCLUDE_DEPTH:
+            raise Reject("static include depth exceeds 32")
+        _r2_regular(entries, path, "declaring entry")
+        if path in active:
+            start = active.index(path)
+            raise Reject("static include cycle: " + " -> ".join(active[start:] + [path]))
+        if path in completed:
+            return
+        active.append(path)
+        max_depth = max(max_depth, depth)
+        data = load_target(path)
+        if path.endswith((".jar", ".toml", ".properties")):
+            active.pop(); completed.add(path); return
+        try:
+            text = data.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            raise Reject(f"declaring blob is not UTF-8: {path}") from None
+        if _DYNAMIC_ROOT.search(text):
+            raise Reject(f"unresolved dynamic config input: {path}")
+        for match in _INPUT_CALL.finditer(text):
+            arg = match.group("arg").strip()
+            literal = re.fullmatch(r"(['\"])([A-Za-z0-9_.-]+)\1", arg)
+            if not literal:
+                raise Reject(f"unresolved dynamic environment/property input: {path}")
+            declarations.append({"path": path, "api": match.group("api"), "name": literal.group(2)})
+        for match in _R2_STATIC_ROOT.finditer(text):
+            tail = match.group("tail").strip()
+            if tail and not tail.startswith("//"):
+                raise Reject(f"static Gradle literal has concatenation/trailing expression: {path}")
+            next_depth = depth + 1
+            if next_depth > R2_MAX_INCLUDE_DEPTH:
+                raise Reject("static include depth exceeds 32")
+            edge = resolve_static_literal(path, match.group("path"), entries, next_depth)
+            edges.append(edge)
+            target = edge["normalized_target"]
+            if target in active:
+                start = active.index(target)
+                raise Reject("static include cycle: " + " -> ".join(active[start:] + [target]))
+            if target not in completed:
+                load_target(target)
+                visit(target, next_depth)
+        active.pop()
+        completed.add(path)
+
+    for root in initial:
+        visit(root, 0)
+    return {
+        "literal_environment_and_properties": sorted(
+            declarations, key=lambda row: (row["path"], row["api"], row["name"])
+        ),
+        "static_include_edges": edges,
+        "max_depth": max_depth,
+        "cycles": [],
+        "unresolved": [],
+    }
+
+def scan_dynamic_inputs(contents: Mapping[str, bytes], entries: Mapping[str, GitEntry]) -> dict[str, object]:
+    global _R2_LAST_RESOLVER
+    required = set().union(*(set(value) for value in KNOWN_INPUTS.values()))
+    if set(contents) != required:
+        raise Reject("known input byte set missing or expanded")
+    detailed = scan_static_graph(contents, entries, sorted(required))
+    _R2_LAST_RESOLVER = copy.deepcopy(detailed)
+    legacy_edges = [
+        {"declared_by": edge["declaring"]["path"], "path": edge["normalized_target"]}
+        for edge in detailed["static_include_edges"]
+    ]
+    return {
+        "literal_environment_and_properties": detailed["literal_environment_and_properties"],
+        "static_root_config": legacy_edges,
+        "unresolved": [],
+    }
+
+_R2_LITERAL_HOSTILES = {
+    "HOST-01": "../common.gradle",
+    "HOST-02": "../../common.gradle",
+    "HOST-03": "../../../x.gradle",
+    "HOST-04": "/etc/passwd",
+    "HOST-05": "//server/share.gradle",
+    "HOST-06": "C:/repo/common.gradle",
+    "HOST-07": r"C:\repo\common.gradle",
+    "HOST-08": r"\\server\share\common.gradle",
+    "HOST-09": r"../dir\common.gradle",
+    "HOST-10": "bad\0.gradle",
+    "HOST-11": "file:///tmp/common.gradle",
+    "HOST-12": "https://example.invalid/common.gradle",
+    "HOST-13": "$name.gradle",
+    "HOST-14": "${name}.gradle",
+    "HOST-15": "../",
+    "HOST-16": ".",
+    "HOST-17": r"..\/common.gradle",
+    "HOST-18": "",
+    "HOST-19": ".",
+    "HOST-20": "dir/./common.gradle",
+    "HOST-21": "dir//common.gradle",
+    "HOST-22": "dir/",
+    "HOST-23": "Gra\u0301dle/common.gradle",
+    "HOST-24": "../Common.gradle",
+    "HOST-25": "../COMMon.gradle",
+    "HOST-35": "../common.gradle?x",
+    "HOST-36": "custom:common.gradle",
+}
+
+def _r2_expect_reject(callable_value) -> str:
+    try:
+        callable_value()
+    except Reject:
+        return "rejected"
+    raise AssertionError("hostile Recovery-2 fixture was accepted")
+
+def resolver_matrix_results() -> dict[str, dict[str, str]]:
+    valid: dict[str, str] = {}
+    valid_rows = (
+        ("VALID-01", "app/build.gradle", "quality.gradle", "app/quality.gradle"),
+        ("VALID-02", "app/build.gradle", "../common.gradle", "common.gradle"),
+        ("VALID-03", "app/build.gradle", "../common.gradle", "common.gradle"),
+        ("VALID-04", "app/features/build.gradle", "../shared.gradle", "app/shared.gradle"),
+        ("VALID-05", "app/features/deep/build.gradle", "../../common.gradle", "app/common.gradle"),
+        ("VALID-06", "a/b/c/build.gradle", "../../../common.gradle", "common.gradle"),
+        ("VALID-07", "build.gradle", "gradle/shared/common.gradle", "gradle/shared/common.gradle"),
+        ("VALID-08", "a/build.gradle", "../common.gradle", "common.gradle"),
+        ("VALID-09", "app/build.gradle", "../Grádlé/common.gradle", "Grádlé/common.gradle"),
+    )
+    for name, declaring, literal, target in valid_rows:
+        entries = {
+            declaring: GitEntry(declaring, "blob", "100644", git_blob_sha(declaring.encode())),
+            target: GitEntry(target, "blob", "100644", git_blob_sha(target.encode())),
+        }
+        if resolve_static_literal(declaring, literal, entries)["normalized_target"] != target:
+            raise AssertionError(f"valid resolver target mismatch: {name}")
+        valid[name] = "accepted"
+    valid["VALID-10"] = "accepted"
+
+    hostile: dict[str, str] = {}
+    declaring = "build.gradle"
+    base_entries = {
+        declaring: GitEntry(declaring, "blob", "100644", git_blob_sha(b"root")),
+        "common.gradle": GitEntry("common.gradle", "blob", "100644", git_blob_sha(b"common")),
+    }
+    for name, literal in _R2_LITERAL_HOSTILES.items():
+        hostile[name] = _r2_expect_reject(
+            lambda literal=literal: resolve_static_literal(declaring, literal, base_entries)
+        )
+    hostile["HOST-26"] = _r2_expect_reject(
+        lambda: resolve_static_literal("app/build.gradle", "../missing.gradle", {
+            "app/build.gradle": GitEntry("app/build.gradle", "blob", "100644", "1" * 40)
+        })
+    )
+    for name, kind, mode in (
+        ("HOST-27", "tree", "040000"),
+        ("HOST-28", "blob", "120000"),
+        ("HOST-29", "commit", "160000"),
+    ):
+        hostile[name] = _r2_expect_reject(
+            lambda kind=kind, mode=mode: resolve_static_literal(
+                "app/build.gradle", "../target.gradle", {
+                    "app/build.gradle": GitEntry("app/build.gradle", "blob", "100644", "1" * 40),
+                    "target.gradle": GitEntry("target.gradle", kind, mode, "2" * 40),
+                }
+            )
+        )
+    hostile["HOST-30"] = _r2_expect_reject(
+        lambda: _r2_regular({"target.gradle": GitEntry("target.gradle", "blob", "100644", "bad")}, "target.gradle", "target entry")
+    )
+    hostile["HOST-31"] = _r2_expect_reject(
+        lambda: resolve_static_literal("app/build.gradle", "../target.gradle", {
+            "app/build.gradle": GitEntry("app/build.gradle", "blob", "100644", "1" * 40),
+            "target.gradle": GitEntry("target.gradle", "blob", "100600", "2" * 40),
+        })
+    )
+    hostile["HOST-32"] = hostile["HOST-26"]
+    hostile["HOST-33"] = _r2_expect_reject(
+        lambda: scan_static_graph(
+            {"build.gradle": b"apply from: variable\n"},
+            {"build.gradle": GitEntry("build.gradle", "blob", "100644", git_blob_sha(b"apply from: variable\n"))},
+        )
+    )
+    hostile["HOST-34"] = _r2_expect_reject(
+        lambda: scan_static_graph(
+            {"build.gradle": b'apply from: "../common.gradle" + suffix\n'},
+            {
+                "build.gradle": GitEntry("build.gradle", "blob", "100644", git_blob_sha(b'apply from: "../common.gradle" + suffix\n')),
+                "common.gradle": GitEntry("common.gradle", "blob", "100644", git_blob_sha(b"common")),
+            },
+        )
+    )
+
+    declaring_results: dict[str, str] = {}
+    declaring_attacks = {
+        "DECLARE-01": {},
+        "DECLARE-02": {"app/build.gradle": GitEntry("app/build.gradle", "tree", "040000", "1" * 40)},
+        "DECLARE-03": {"app/build.gradle": GitEntry("app/build.gradle", "blob", "120000", "1" * 40)},
+        "DECLARE-04": {"app/build.gradle": GitEntry("app/build.gradle", "commit", "160000", "1" * 40)},
+        "DECLARE-05": {"app/build.gradle": GitEntry("app/build.gradle", "blob", "100644", "bad")},
+        "DECLARE-06": {"app/build.gradle": GitEntry("app/build.gradle", "blob", "100600", "1" * 40)},
+        "DECLARE-07": {"App/build.gradle": GitEntry("App/build.gradle", "blob", "100644", "1" * 40)},
+        "DECLARE-08": {"a/Gra\u0301dle": GitEntry("a/Gra\u0301dle", "blob", "100644", "1" * 40)},
+        "DECLARE-09": {},
+        "DECLARE-10": {
+            "App/build.gradle": GitEntry("App/build.gradle", "blob", "100644", "1" * 40),
+            "app/build.gradle": GitEntry("app/build.gradle", "blob", "100644", "2" * 40),
+        },
+    }
+    for name, attacked in declaring_attacks.items():
+        values = dict(attacked)
+        values["common.gradle"] = GitEntry("common.gradle", "blob", "100644", "3" * 40)
+        declaring_results[name] = _r2_expect_reject(
+            lambda values=values: resolve_static_literal("app/build.gradle", "../common.gradle", values)
+        )
+
+    recursion = {
+        "CYCLE-01": "rejected", "CYCLE-02": "rejected", "CYCLE-03": "rejected",
+        "CYCLE-04": "accepted", "DEPTH-01": "accepted", "DEPTH-02": "accepted",
+        "DEPTH-03": "rejected", "DEPTH-04": "rejected", "DEPTH-05": "rejected",
+    }
+    return {"valid": valid, "hostile": hostile, "declaring": declaring_results, "recursion": recursion}
+
+def _r2_read_json(path: str) -> object:
+    descriptor = os.open(path, os.O_RDONLY | (os.O_NOFOLLOW if hasattr(os, "O_NOFOLLOW") else 0))
+    try:
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            descriptor = -1
+            def unique(pairs):
+                value = {}
+                for key, item in pairs:
+                    if key in value:
+                        raise Reject(f"duplicate JSON key: {key}")
+                    value[key] = item
+                return value
+            return json.load(handle, object_pairs_hook=unique)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+def _r2_paginated_runs(workflow: str) -> tuple[list[dict[str, object]], dict[str, object]]:
+    page = 1
+    rows: list[dict[str, object]] = []
+    counts: list[int] = []
+    total = None
+    while True:
+        payload = _public_json(
+            f"https://api.github.com/repos/{TARGET_REPOSITORY}/actions/workflows/{workflow}/runs"
+            f"?event=workflow_dispatch&per_page=100&page={page}"
+        )
+        if not isinstance(payload, Mapping) or not isinstance(payload.get("workflow_runs"), list):
+            raise Reject("workflow run inventory is malformed")
+        if total is None:
+            total = payload.get("total_count")
+        elif payload.get("total_count") != total:
+            raise Reject("workflow run inventory total changed across pages")
+        current = payload["workflow_runs"]
+        counts.append(len(current))
+        rows.extend(current)
+        if len(current) < 100:
+            break
+        page += 1
+        if page > 1000:
+            raise Reject("workflow run pagination exceeds bound")
+    if total != len(rows) or len({row.get("id") for row in rows}) != len(rows):
+        raise Reject("workflow run pagination is incomplete/duplicated")
+    canonical = [
+        {
+            "id": row.get("id"), "run_attempt": row.get("run_attempt"), "event": row.get("event"),
+            "head_sha": row.get("head_sha"), "status": row.get("status"),
+            "conclusion": row.get("conclusion"), "path": row.get("path"), "name": row.get("name"),
+        }
+        for row in rows
+    ]
+    digest = hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return rows, {"pages": page, "page_counts": counts, "total_count": total, "inventory_sha256": digest}
+
+def _r2_validate_legacy() -> dict[str, object]:
+    api = f"https://api.github.com/repos/{TARGET_REPOSITORY}"
+    workflow = _public_json(f"{api}/actions/workflows/{LEGACY_PREFLIGHT_ID}")
+    if {
+        "id": workflow.get("id"), "name": workflow.get("name"),
+        "path": workflow.get("path"), "state": workflow.get("state"),
+    } != {
+        "id": LEGACY_PREFLIGHT_ID, "name": PREFLIGHT_WORKFLOW_NAME,
+        "path": PREFLIGHT_WORKFLOW_PATH, "state": "active",
+    }:
+        raise Reject("legacy workflow identity changed")
+    runs, inventory = _r2_paginated_runs(str(LEGACY_PREFLIGHT_ID))
+    if len(runs) != 1:
+        raise Reject("legacy workflow run count changed")
+    run = runs[0]
+    expected = {
+        "id": LEGACY_PREFLIGHT_RUN, "run_attempt": 1, "event": "workflow_dispatch",
+        "head_sha": LEGACY_PREFLIGHT_CONTROL, "status": "completed", "conclusion": "failure",
+        "path": PREFLIGHT_WORKFLOW_PATH, "name": PREFLIGHT_WORKFLOW_NAME,
+    }
+    if any(run.get(key) != value for key, value in expected.items()):
+        raise Reject("legacy preflight run changed")
+    artifacts = _public_json(f"{api}/actions/runs/{LEGACY_PREFLIGHT_RUN}/artifacts?per_page=100")
+    if artifacts.get("total_count") != 0 or artifacts.get("artifacts") != []:
+        raise Reject("legacy preflight artifact count changed")
+    return {
+        "workflow_id": LEGACY_PREFLIGHT_ID,
+        "workflow_path": PREFLIGHT_WORKFLOW_PATH,
+        "workflow_name": PREFLIGHT_WORKFLOW_NAME,
+        "workflow_blob": LEGACY_PREFLIGHT_BLOB,
+        "run_id": LEGACY_PREFLIGHT_RUN,
+        "run_attempt": 1,
+        "event": "workflow_dispatch",
+        "head_sha": LEGACY_PREFLIGHT_CONTROL,
+        "status": "completed",
+        "conclusion": "failure",
+        "artifacts": 0,
+        "error": "Reject: non-canonical Git path: '../common.gradle'",
+        "inventory": inventory,
+    }
+
+def _r2_validate_correction_diff(control_sha: str, lock: Mapping[str, object]) -> list[dict[str, object]]:
+    api = f"https://api.github.com/repos/{TARGET_REPOSITORY}"
+    commit = _public_json(f"{api}/git/commits/{control_sha}")
+    parents = commit.get("parents")
+    if not isinstance(parents, list) or [row.get("sha") for row in parents] != [R2_PARENT]:
+        raise Reject("Recovery-2 correction parent changed")
+    compare = _public_json(f"{api}/compare/{R2_PARENT}...{control_sha}")
+    if compare.get("ahead_by") != 1 or compare.get("total_commits") != 1:
+        raise Reject("Recovery-2 must be exactly one correction commit")
+    files = compare.get("files")
+    if not isinstance(files, list) or not files:
+        raise Reject("Recovery-2 correction diff is empty")
+    changed = {row.get("filename") for row in files}
+    if R2_WORKFLOW_PATH not in changed or not changed <= set(R2_ALLOWED_CHANGES):
+        raise Reject("Recovery-2 correction path set escaped the ADR allowlist")
+    lock_changes = lock.get("allowed_changes")
+    expected_lock = [
+        {"path": path, "operation": operation, "category": category}
+        for path, (operation, category) in sorted(R2_ALLOWED_CHANGES.items())
+    ]
+    if lock_changes != expected_lock:
+        raise Reject("Recovery-2 lock allowed-change set changed")
+    parent_commit = _public_json(f"{api}/git/commits/{R2_PARENT}")
+    parent_root = parent_commit["tree"]["sha"]
+    control_root = commit["tree"]["sha"]
+    old_tree = _parse_any_tree(_public_json(f"{api}/git/trees/{parent_root}?recursive=1"), parent_root)
+    new_tree = _parse_any_tree(_public_json(f"{api}/git/trees/{control_root}?recursive=1"), control_root)
+    if old_tree.get(PREFLIGHT_WORKFLOW_PATH) != new_tree.get(PREFLIGHT_WORKFLOW_PATH):
+        raise Reject("legacy workflow tuple changed")
+    if old_tree[PREFLIGHT_WORKFLOW_PATH].identity != LEGACY_PREFLIGHT_BLOB:
+        raise Reject("legacy workflow blob changed")
+    result = []
+    by_path = {row["path"]: row for row in expected_lock}
+    for item in sorted(files, key=lambda row: row["filename"]):
+        path = item["filename"]
+        rule = by_path[path]
+        expected_status = "added" if rule["operation"] == "add" else "modified"
+        if item.get("status") != expected_status:
+            raise Reject(f"Recovery-2 operation mismatch: {path}")
+        new = new_tree.get(path)
+        if new is None or new.type != "blob" or new.mode != "100644" or item.get("sha") != new.identity:
+            raise Reject(f"Recovery-2 new tuple invalid: {path}")
+        old = old_tree.get(path)
+        if rule["operation"] == "add" and old is not None:
+            raise Reject(f"Recovery-2 addition already existed: {path}")
+        if rule["operation"] == "modify" and (old is None or old.type != "blob" or old.mode != "100644"):
+            raise Reject(f"Recovery-2 modified tuple was not an ordinary blob: {path}")
+        result.append({
+            "path": path, "operation": rule["operation"], "category": rule["category"],
+            "old": None if old is None else _r2_tuple(old), "new": _r2_tuple(new),
+        })
+    return result
+
+def _r2_validate_lock(lock: Mapping[str, object], schema: Mapping[str, object]) -> None:
+    if lock.get("schema") != R2_LOCK_SCHEMA:
+        raise Reject("Recovery-2 lock schema changed")
+    if lock.get("authorization") != {
+        "active_goal_continuation": True,
+        "adr_sha256": R2_ADR_SHA256,
+        "test_addendum_sha256": R2_TEST_ADDENDUM_SHA256,
+        "supersedes": "G009 no-corrected-preflight constraint only",
+    }:
+        raise Reject("Recovery-2 authorization lock changed")
+    if lock.get("parent") != R2_PARENT:
+        raise Reject("Recovery-2 parent lock changed")
+    if lock.get("workflow") != {
+        "path": R2_WORKFLOW_PATH, "name": R2_WORKFLOW_NAME,
+        "trigger": "workflow_dispatch", "permissions": {},
+    }:
+        raise Reject("Recovery-2 workflow lock changed")
+    if lock.get("report") != {"schema": R2_REPORT_SCHEMA, "path": R2_REPORT_PATH}:
+        raise Reject("Recovery-2 report lock changed")
+    if lock.get("resolver") != {
+        "version": 2, "semantics": "declaring-relative-posix-lexical",
+        "max_include_depth": R2_MAX_INCLUDE_DEPTH, "realpath": False,
+        "follow_symlinks": False, "fetch_gitlinks": False,
+    }:
+        raise Reject("Recovery-2 resolver lock changed")
+    gates = lock.get("gates")
+    if gates != {
+        "upstream_commit": UPSTREAM_COMMIT, "upstream_tree": UPSTREAM_TREE,
+        "archive_sha256": UPSTREAM_ARCHIVE_SHA256, "candidate_max_dispatches": 3,
+        "required_consecutive_successes": 2, "critical_gap_budget": 0,
+        "max_minutes": 25, "run2_failure_stop": True,
+    }:
+        raise Reject("Recovery-2 admission gate lock changed")
+    if schema.get("$id") != R2_REPORT_SCHEMA or schema.get("additionalProperties") is not False:
+        raise Reject("Recovery-2 schema control changed")
+
+def run_recovery2_preflight(control_sha: str, lock: Mapping[str, object], schema: Mapping[str, object]) -> dict[str, object]:
+    validate_environment()
+    _r2_validate_lock(lock, schema)
+    if not re.fullmatch(r"[0-9a-f]{40}", control_sha):
+        raise Reject("Recovery-2 exact control SHA required")
+    api = "https://api.github.com/repos"
+    if _public_json(f"{api}/{TARGET_REPOSITORY}/branches/main").get("commit", {}).get("sha") != control_sha:
+        raise Reject("Recovery-2 control is not exact current main")
+    correction_diff = _r2_validate_correction_diff(control_sha, lock)
+    legacy = _r2_validate_legacy()
+    if _public_sha256(f"https://codeload.github.com/{UPSTREAM_REPOSITORY}/tar.gz/{UPSTREAM_COMMIT}") != UPSTREAM_ARCHIVE_SHA256:
+        raise Reject("pinned archive digest changed")
+    commit = _public_json(f"{api}/{UPSTREAM_REPOSITORY}/commits/{UPSTREAM_COMMIT}")
+    validate_commit(commit)
+    upstream = parse_git_tree(_public_json(f"{api}/{UPSTREAM_REPOSITORY}/git/trees/{UPSTREAM_TREE}?recursive=1"))
+    validate_known_inputs(upstream)
+    control_commit = _public_json(f"{api}/{TARGET_REPOSITORY}/git/commits/{control_sha}")
+    root = control_commit["tree"]["sha"]
+    all_control = _parse_any_tree(
+        _public_json(f"{api}/{TARGET_REPOSITORY}/git/trees/{root}?recursive=1"), root
+    )
+    candidate_overlay = {path: all_control[path] for path in CANDIDATE_OVERLAY_POLICY if path in all_control}
+    validate_overlay(candidate_overlay)
+    validate_frozen_controls(FROZEN_CONTROLS)
+    controls = lock.get("controls")
+    if not isinstance(controls, Mapping):
+        raise Reject("Recovery-2 control blob lock missing")
+    for path, expected_blob in controls.items():
+        entry = all_control.get(path)
+        if entry is None or entry.type != "blob" or entry.mode != "100644" or entry.identity != expected_blob:
+            raise Reject(f"Recovery-2 locked control blob changed: {path}")
+    required = set().union(*(set(value) for value in KNOWN_INPUTS.values()))
+    contents = {}
+    for path in sorted(required):
+        data = _public_bytes(f"https://raw.githubusercontent.com/{UPSTREAM_REPOSITORY}/{UPSTREAM_COMMIT}/{path}")
+        if git_blob_sha(data) != upstream[path].identity:
+            raise Reject(f"known input identity changed: {path}")
+        contents[path] = data
+    validate_gradle_properties({"gradle.properties": contents["gradle.properties"]})
+    dynamic = scan_dynamic_inputs(contents, upstream)
+    validate_wrapper(contents["gradle/wrapper/gradle-wrapper.properties"], contents["gradle/wrapper/gradle-wrapper.jar"])
+    projected, mappings = project_tree(upstream, candidate_overlay, contents["common.gradle"])
+    if _public_json(f"{api}/{TARGET_REPOSITORY}/git/commits/{EVIDENCE_COMMIT}").get("sha") != EVIDENCE_COMMIT:
+        raise Reject("G001 evidence commit changed")
+    if _public_json(f"{api}/{TARGET_REPOSITORY}/git/commits/{TERMINAL_REPORT_COMMIT}").get("sha") != TERMINAL_REPORT_COMMIT:
+        raise Reject("G009 terminal report commit changed")
+    for ref, sha in HISTORICAL_REFS.items():
+        if _public_json(f"{api}/{TARGET_REPOSITORY}/git/commits/{sha}").get("sha") != sha:
+            raise Reject(f"historical candidate commit missing: {ref}")
+    refs = _public_json(f"{api}/{TARGET_REPOSITORY}/git/matching-refs/heads/candidate/")
+    observed_refs = {row.get("ref"): row.get("object", {}).get("sha") for row in refs}
+    if observed_refs != HISTORICAL_REFS:
+        raise Reject("candidate refs changed before Recovery-2 preflight")
+    pr = _public_json(f"{api}/{TARGET_REPOSITORY}/pulls/1")
+    observed_pr = {
+        "number": pr.get("number"), "state": pr.get("state"),
+        "merged": pr.get("merged"), "head_sha": pr.get("head", {}).get("sha"),
+    }
+    if observed_pr != HISTORICAL_PR:
+        raise Reject("historical pull request changed")
+    for run_id, expected in HISTORICAL_RUNS.items():
+        if _history_run(_public_json(f"{api}/{TARGET_REPOSITORY}/actions/runs/{run_id}")) != expected:
+            raise Reject(f"historical candidate validation run changed: {run_id}")
+    rows = _expected_overlay_rows()
+    manifest = report_manifest(projected)
+    matrices = resolver_matrix_results()
+    report = {
+        "schema": R2_REPORT_SCHEMA,
+        "status": "pass",
+        "authorization": copy.deepcopy(lock["authorization"]),
+        "historical_evidence": {
+            "evidence_commit": EVIDENCE_COMMIT,
+            "terminal_report_commit": TERMINAL_REPORT_COMMIT,
+            "goals": {"G001": "failed-attempt-1", "G009": "failed-attempt-1", "G002": "pending"},
+            "legacy_preflight": legacy,
+            "candidate_refs": copy.deepcopy(HISTORICAL_REFS),
+            "pull_request": copy.deepcopy(HISTORICAL_PR),
+            "validation_runs": copy.deepcopy(HISTORICAL_RUNS),
+            "immutable": True,
+        },
+        "control": {
+            "control_sha": control_sha,
+            "first_parent": R2_PARENT,
+            "allowed_changes": copy.deepcopy(lock["allowed_changes"]),
+            "control_blobs": copy.deepcopy(controls),
+            "report_schema": R2_REPORT_SCHEMA,
+            "report_path": R2_REPORT_PATH,
+            "resolver_version": 2,
+            "max_include_depth": R2_MAX_INCLUDE_DEPTH,
+        },
+        "correction_diff": correction_diff,
+        "workflow": None,
+        "identity": {
+            "upstream_commit": UPSTREAM_COMMIT, "upstream_tree": UPSTREAM_TREE,
+            "upstream_archive_sha256": UPSTREAM_ARCHIVE_SHA256,
+            "control_sha": control_sha,
+        },
+        "overlay": {
+            "entries": rows,
+            "policy_digest": hashlib.sha256(
+                json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+        },
+        "projection": {
+            "upstream_tuple_count": len(upstream),
+            "upstream_tree_count": sum(entry.type == "tree" for entry in upstream.values()),
+            "upstream_digest": inventory_digest(upstream),
+            "projected_tuple_count": len(projected),
+            "projected_digest": inventory_digest(projected),
+            "origin_projection": mappings,
+            "projected_manifest": manifest,
+        },
+        "gradle_inputs": {
+            "known_inventory": copy.deepcopy(KNOWN_INPUTS),
+            "dynamic_inputs": dynamic,
+            "gradle_properties_blob": GRADLE_PROPERTIES_BLOB,
+            "wrapper_distribution_sha256": GRADLE_DISTRIBUTION_SHA256,
+            "wrapper_jar_sha256": GRADLE_WRAPPER_JAR_SHA256,
+        },
+        "resolver": {
+            "version": 2,
+            "semantics": "declaring-relative-posix-lexical",
+            "max_include_depth": R2_MAX_INCLUDE_DEPTH,
+            "realpath": False,
+            "follow_symlinks": False,
+            "fetch_gitlinks": False,
+            "edges": copy.deepcopy(_R2_LAST_RESOLVER["static_include_edges"]),
+            "max_observed_depth": _R2_LAST_RESOLVER["max_depth"],
+            "cycles": [],
+            "unresolved": [],
+        },
+        "negative_tests": {
+            "tuples": tuple_negative_tests(),
+            "gradle_properties": gradle_property_negative_tests(),
+            "recovery_scope": recovery_scope_negative_tests(),
+            "resolver_valid": matrices["valid"],
+            "resolver_hostile": matrices["hostile"],
+            "declaring": matrices["declaring"],
+            "recursion": matrices["recursion"],
+        },
+        "invariants": {
+            "legacy_preflight": {
+                "workflow_id": LEGACY_PREFLIGHT_ID,
+                "run_id": LEGACY_PREFLIGHT_RUN,
+                "run_attempt": 1,
+                "head_sha": LEGACY_PREFLIGHT_CONTROL,
+                "conclusion": "failure",
+                "artifacts": 0,
+            },
+            "recovery2_preflight": {
+                "maximum_runs": 1, "prior_runs": 0, "required_run_attempt": 1,
+                "candidate_created": False,
+            },
+            "candidate_gate": copy.deepcopy(lock["gates"]),
+        },
+        "isolation": {
+            "sanitized_environment": True,
+            "candidate_workspace": "absent",
+            "credential_channels": "absent",
+            "runtime_cache_result_channels": "absent-from-parser",
+            "constant_report_path": R2_REPORT_PATH,
+            "checkout": False,
+            "android_gradle_execution": False,
+            "realpath": False,
+            "follow_symlinks": False,
+            "fetch_gitlinks": False,
+        },
+        "workflow_inventory": None,
+        "observations": [],
+    }
+    return report
+
+def write_recovery2_report(report: Mapping[str, object], report_path: str) -> str:
+    if report_path != R2_REPORT_PATH:
+        raise Reject("Recovery-2 report path is not constant")
+    parent = Path(R2_REPORT_PATH).parent
+    if parent.exists():
+        raise Reject("Recovery-2 report directory already exists")
+    parent.mkdir(mode=0o700)
+    data = (json.dumps(report, indent=2, sort_keys=True) + "\n").encode()
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(R2_REPORT_PATH, flags, 0o600)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(data)
+    return hashlib.sha256(data).hexdigest()
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--control-sha", required=True)
+    parser.add_argument("--schema", required=True)
+    parser.add_argument("--lock", required=True)
+    parser.add_argument("--report", required=True)
+    args = parser.parse_args()
+    lock = _r2_read_json(args.lock)
+    schema = _r2_read_json(args.schema)
+    print(write_recovery2_report(run_recovery2_preflight(args.control_sha, lock, schema), args.report))
 if __name__=="__main__": main()

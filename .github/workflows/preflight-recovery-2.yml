@@ -1,0 +1,277 @@
+name: Recovery 2 — one-shot trusted preflight
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: story1-recovery-2-preflight-once
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  preflight:
+    name: Recovery-2 trusted non-executing preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions: {}
+    steps:
+      - name: Prove immutable history and sole Recovery-2 run at start
+        shell: bash
+        run: |
+          env -i \
+            PATH='/usr/bin:/bin' \
+            HOME='/tmp/podcast-clips-recovery-2-guard-home' \
+            LANG='C.UTF-8' \
+            LC_ALL='C.UTF-8' \
+            CONTROL_SHA='${{ github.workflow_sha }}' \
+            HEAD_SHA='${{ github.sha }}' \
+            RUN_ID='${{ github.run_id }}' \
+            RUN_ATTEMPT='${{ github.run_attempt }}' \
+            EVENT_NAME='${{ github.event_name }}' \
+            REF_NAME='${{ github.ref }}' \
+            REPOSITORY='${{ github.repository }}' \
+            python3 - <<'PY'
+          import hashlib, json, os, re, time, urllib.request
+          from datetime import datetime, timezone
+
+          PARENT="c43ddf3409ea0ea793982f07926ce1e1a6925c82"
+          OLD_ID=315057380
+          OLD_RUN=29575201182
+          OLD_SHA="fc0ed383c0f4e1cf527f88d0ac3033973a379a4e"
+          OLD_PATH=".github/workflows/preflight-recovery.yml"
+          OLD_NAME="Story 1 recovery preflight"
+          NEW_PATH=".github/workflows/preflight-recovery-2.yml"
+          NEW_NAME="Recovery 2 — one-shot trusted preflight"
+
+          def public_json(url):
+              request=urllib.request.Request(url,headers={"User-Agent":"podcast-clips-recovery-2-guard/1"})
+              with urllib.request.urlopen(request,timeout=30) as response:
+                  return json.load(response)
+
+          def digest(value):
+              return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+
+          def runs(workflow):
+              rows=[]; counts=[]; total=None; page=1
+              while True:
+                  payload=public_json(f"{api}/actions/workflows/{workflow}/runs?event=workflow_dispatch&per_page=100&page={page}")
+                  if total is None: total=payload.get("total_count")
+                  elif payload.get("total_count")!=total: raise SystemExit("run total changed across pages")
+                  current=payload.get("workflow_runs")
+                  if not isinstance(current,list): raise SystemExit("run page malformed")
+                  rows.extend(current); counts.append(len(current))
+                  if len(current)<100: break
+                  page+=1
+                  if page>1000: raise SystemExit("run pagination exceeds bound")
+              if total!=len(rows) or len({row.get("id") for row in rows})!=len(rows):
+                  raise SystemExit("run pagination incomplete/duplicated")
+              canonical=[{"id":row.get("id"),"run_attempt":row.get("run_attempt"),"event":row.get("event"),
+                          "head_sha":row.get("head_sha"),"status":row.get("status"),
+                          "conclusion":row.get("conclusion"),"path":row.get("path"),"name":row.get("name")}
+                         for row in rows]
+              return rows,{"pages":page,"page_counts":counts,"total_count":total,
+                           "inventory_sha256":digest(canonical),"runs":canonical}
+
+          sha=os.environ["CONTROL_SHA"]
+          if not re.fullmatch(r"[0-9a-f]{40}",sha) or os.environ["HEAD_SHA"]!=sha:
+              raise SystemExit("workflow/head SHA mismatch")
+          if os.environ["RUN_ATTEMPT"]!="1" or os.environ["EVENT_NAME"]!="workflow_dispatch":
+              raise SystemExit("rerun/non-dispatch event rejected")
+          if os.environ["REF_NAME"]!="refs/heads/main":
+              raise SystemExit("Recovery-2 is main-only")
+          api=f"https://api.github.com/repos/{os.environ['REPOSITORY']}"
+          if public_json(f"{api}/branches/main")["commit"]["sha"]!=sha:
+              raise SystemExit("main is not the immutable correction SHA")
+          commit=public_json(f"{api}/git/commits/{sha}")
+          if [row.get("sha") for row in commit.get("parents",[])]!=[PARENT]:
+              raise SystemExit("correction parent changed")
+          old=public_json(f"{api}/actions/workflows/{OLD_ID}")
+          if {key:old.get(key) for key in ("id","name","path","state")}!={"id":OLD_ID,"name":OLD_NAME,"path":OLD_PATH,"state":"active"}:
+              raise SystemExit("legacy workflow identity changed")
+          old_rows,old_inventory=runs(str(OLD_ID))
+          if len(old_rows)!=1: raise SystemExit("legacy workflow run count changed")
+          expected={"id":OLD_RUN,"run_attempt":1,"event":"workflow_dispatch","head_sha":OLD_SHA,
+                    "status":"completed","conclusion":"failure","path":OLD_PATH,"name":OLD_NAME}
+          if any(old_rows[0].get(key)!=value for key,value in expected.items()):
+              raise SystemExit("legacy run evidence changed")
+          artifacts=public_json(f"{api}/actions/runs/{OLD_RUN}/artifacts?per_page=100")
+          if artifacts.get("total_count")!=0 or artifacts.get("artifacts")!=[]:
+              raise SystemExit("legacy artifact count changed")
+          current=None; evidence=None
+          for _ in range(8):
+              current_rows,evidence=runs("preflight-recovery-2.yml")
+              if len(current_rows)==1:
+                  current=current_rows[0]; break
+              time.sleep(2)
+          expected={"id":int(os.environ["RUN_ID"]),"run_attempt":1,"event":"workflow_dispatch",
+                    "head_sha":sha,"path":NEW_PATH,"name":NEW_NAME}
+          if current is None or any(current.get(key)!=value for key,value in expected.items()):
+              raise SystemExit("zero-prior/exactly-one-current Recovery-2 run not proved")
+          evidence["stage"]="in_workflow_start"
+          evidence["observed_at"]=datetime.now(timezone.utc).isoformat().replace("+00:00","Z")
+          root="/tmp/podcast-clips-recovery-2-evidence"
+          os.mkdir(root,0o700)
+          descriptor=os.open(root+"/start.json",os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+          with os.fdopen(descriptor,"w",encoding="utf-8") as handle:
+              json.dump(evidence,handle,sort_keys=True,separators=(",",":")); handle.write("\n")
+          PY
+
+      - name: Fetch and verify exact Recovery-2 controls without checkout
+        shell: bash
+        run: |
+          env -i \
+            PATH='/usr/bin:/bin' \
+            HOME='/tmp/podcast-clips-recovery-2-fetch-home' \
+            LANG='C.UTF-8' \
+            LC_ALL='C.UTF-8' \
+            CONTROL_SHA='${{ github.workflow_sha }}' \
+            REPOSITORY='${{ github.repository }}' \
+            python3 - <<'PY'
+          import hashlib, os, re, urllib.request
+          root="/tmp/podcast-clips-recovery-2-controls"
+          os.mkdir(root,0o700)
+          expected={
+              "scripts/ci/recovery_preflight.py":"ddb06661926bdd4b1242495bd745a9fac1023330",
+              "scripts/ci/test_recovery_preflight.py":"cb133590469f1667013bea74730caa7f07fbcd29",
+              "scripts/ci/validate_preflight_report.py":"3fab41a0ade50f8b88af79081740378743c0c1d4",
+              "config/recovery-preflight-report-v2.schema.json":"41ebc6875851ad6259cf3799b470f792798a7a65",
+              "config/recovery-2-control.lock.json":"809f9aafa026c9c99d475a9202740e9b18e19ad3",
+              ".github/workflows/preflight-recovery.yml":"06008a439355c8be6d657a92c244e03ba27afdaa",
+          }
+          paths=[*expected,".github/workflows/preflight-recovery-2.yml"]
+          sha=os.environ["CONTROL_SHA"]
+          if not re.fullmatch(r"[0-9a-f]{40}",sha): raise SystemExit("invalid control SHA")
+          observed={}
+          for path in paths:
+              url=f"https://raw.githubusercontent.com/{os.environ['REPOSITORY']}/{sha}/{path}"
+              request=urllib.request.Request(url,headers={"User-Agent":"podcast-clips-recovery-2-fetch/1"})
+              with urllib.request.urlopen(request,timeout=30) as response:
+                  data=response.read(4*1024*1024+1)
+              if not data or len(data)>4*1024*1024: raise SystemExit(f"control outside size bound: {path}")
+              identity=hashlib.sha1(f"blob {len(data)}\0".encode()+data).hexdigest()
+              if path in expected and identity!=expected[path]:
+                  raise SystemExit(f"locked control blob mismatch: {path}")
+              observed[path]=identity
+              destination=root+"/"+path.rsplit("/",1)[-1]
+              descriptor=os.open(destination,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+              with os.fdopen(descriptor,"wb") as handle: handle.write(data)
+          workflow=open(root+"/preflight-recovery-2.yml",encoding="utf-8").read()
+          if workflow.count("permissions:"+" {}")!=2: raise SystemExit("workflow permissions are not empty at both scopes")
+          if "on:"+"\n  workflow_"+"dispatch:"+"\n" not in workflow: raise SystemExit("dispatch-only trigger missing")
+          forbidden=("actions/"+ "checkout","GITHUB"+"_"+"TOKEN","GH"+"_"+"TOKEN",
+                     "pull_request_target"+":","workflow_call"+":","schedule"+":","push"+":")
+          if any(token in workflow for token in forbidden): raise SystemExit("forbidden workflow trigger/credential/checkout surface")
+          uses=[line.strip() for line in workflow.splitlines() if line.strip().startswith("uses:")]
+          if uses!=["uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2"]:
+              raise SystemExit("unexpected/mutable action reference")
+          required=("name: Recovery 2 — one-shot trusted preflight",
+                    "group: story1-recovery-2-preflight-once",
+                    "path: /tmp/podcast-clips-recovery-2-preflight/report-v2.json",
+                    "retention-"+"days: 1")
+          if any(token not in workflow for token in required): raise SystemExit("workflow static contract incomplete")
+          with open("/tmp/podcast-clips-recovery-2-evidence/workflow-blob.txt","x",encoding="ascii") as handle:
+              handle.write(observed[".github/workflows/preflight-recovery-2.yml"]+"\n")
+          PY
+
+      - name: Run complete immutable and Recovery-2 stdlib suites
+        shell: bash
+        run: |
+          env -i PATH='/usr/bin:/bin' HOME='/tmp/podcast-clips-recovery-2-test-home' LANG='C.UTF-8' LC_ALL='C.UTF-8' \
+            PYTHONPATH='/tmp/podcast-clips-recovery-2-controls' \
+            python3 -B /tmp/podcast-clips-recovery-2-controls/test_recovery_preflight.py
+          env -i PATH='/usr/bin:/bin' HOME='/tmp/podcast-clips-recovery-2-validator-test-home' LANG='C.UTF-8' LC_ALL='C.UTF-8' \
+            python3 -B /tmp/podcast-clips-recovery-2-controls/validate_preflight_report.py \
+              --self-test \
+              --schema /tmp/podcast-clips-recovery-2-controls/recovery-preflight-report-v2.schema.json \
+              --lock /tmp/podcast-clips-recovery-2-controls/recovery-2-control.lock.json
+
+      - name: Run sanitized non-executing Recovery-2 parser
+        shell: bash
+        run: |
+          env -i PATH='/usr/bin:/bin' HOME='/tmp/podcast-clips-recovery-2-parser-home' LANG='C.UTF-8' LC_ALL='C.UTF-8' \
+            python3 -B /tmp/podcast-clips-recovery-2-controls/recovery_preflight.py \
+              --control-sha '${{ github.workflow_sha }}' \
+              --schema /tmp/podcast-clips-recovery-2-controls/recovery-preflight-report-v2.schema.json \
+              --lock /tmp/podcast-clips-recovery-2-controls/recovery-2-control.lock.json \
+              --report /tmp/podcast-clips-recovery-2-preflight/report-v2.json >/dev/null
+
+      - name: Recheck sole run and bind repeated stage evidence
+        shell: bash
+        run: |
+          env -i \
+            PATH='/usr/bin:/bin' \
+            HOME='/tmp/podcast-clips-recovery-2-end-home' \
+            LANG='C.UTF-8' \
+            LC_ALL='C.UTF-8' \
+            CONTROL_SHA='${{ github.workflow_sha }}' \
+            RUN_ID='${{ github.run_id }}' \
+            REPOSITORY='${{ github.repository }}' \
+            python3 - <<'PY'
+          import hashlib,json,os,urllib.request
+          from datetime import datetime,timezone
+          NEW_PATH=".github/workflows/preflight-recovery-2.yml"
+          NEW_NAME="Recovery 2 — one-shot trusted preflight"
+          def public_json(url):
+              request=urllib.request.Request(url,headers={"User-Agent":"podcast-clips-recovery-2-end/1"})
+              with urllib.request.urlopen(request,timeout=30) as response:return json.load(response)
+          def digest(value):return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+          api=f"https://api.github.com/repos/{os.environ['REPOSITORY']}"
+          rows=[];counts=[];total=None;page=1
+          while True:
+              payload=public_json(f"{api}/actions/workflows/preflight-recovery-2.yml/runs?event=workflow_dispatch&per_page=100&page={page}")
+              if total is None:total=payload.get("total_count")
+              elif payload.get("total_count")!=total:raise SystemExit("run total changed across end pages")
+              current=payload.get("workflow_runs")
+              if not isinstance(current,list):raise SystemExit("end run page malformed")
+              rows.extend(current);counts.append(len(current))
+              if len(current)<100:break
+              page+=1
+              if page>1000:raise SystemExit("end pagination exceeds bound")
+          if total!=len(rows) or len(rows)!=1 or len({row.get("id") for row in rows})!=1:
+              raise SystemExit("exactly one complete Recovery-2 run not proved at end")
+          run=rows[0];sha=os.environ["CONTROL_SHA"];run_id=int(os.environ["RUN_ID"])
+          expected={"id":run_id,"run_attempt":1,"event":"workflow_dispatch","head_sha":sha,"path":NEW_PATH,"name":NEW_NAME}
+          if any(run.get(key)!=value for key,value in expected.items()):raise SystemExit("Recovery-2 end run identity changed")
+          canonical=[{"id":run.get("id"),"run_attempt":run.get("run_attempt"),"event":run.get("event"),
+                      "head_sha":run.get("head_sha"),"status":run.get("status"),"conclusion":run.get("conclusion"),
+                      "path":run.get("path"),"name":run.get("name")}]
+          end={"stage":"in_workflow_end","observed_at":datetime.now(timezone.utc).isoformat().replace("+00:00","Z"),
+               "pages":page,"page_counts":counts,"total_count":total,
+               "inventory_sha256":digest(canonical),"runs":canonical}
+          with open("/tmp/podcast-clips-recovery-2-evidence/start.json",encoding="utf-8") as handle:start=json.load(handle)
+          if start.get("stage")!="in_workflow_start" or start.get("total_count")!=1:raise SystemExit("start observation missing/changed")
+          workflow=public_json(f"{api}/actions/workflows/preflight-recovery-2.yml")
+          if workflow.get("name")!=NEW_NAME or workflow.get("path")!=NEW_PATH or workflow.get("state")!="active":raise SystemExit("Recovery-2 workflow metadata changed")
+          with open("/tmp/podcast-clips-recovery-2-evidence/workflow-blob.txt",encoding="ascii") as handle:blob=handle.read().strip()
+          report_path="/tmp/podcast-clips-recovery-2-preflight/report-v2.json"
+          with open(report_path,encoding="utf-8") as handle:report=json.load(handle)
+          report["workflow"]={"id":workflow["id"],"name":NEW_NAME,"path":NEW_PATH,"state":"active","blob":blob,
+                              "control_sha":sha,"run_id":run_id,"run_attempt":1,"event":"workflow_dispatch","status":run.get("status")}
+          report["workflow_inventory"]={key:end[key] for key in ("pages","page_counts","total_count","inventory_sha256","runs")}
+          report["observations"]=[start,end]
+          temp=report_path+".final"
+          descriptor=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+          with os.fdopen(descriptor,"w",encoding="utf-8") as handle:
+              json.dump(report,handle,indent=2,sort_keys=True);handle.write("\n")
+          os.replace(temp,report_path)
+          PY
+
+      - name: Independently validate the closed schema-v2 report
+        shell: bash
+        run: |
+          env -i PATH='/usr/bin:/bin' HOME='/tmp/podcast-clips-recovery-2-validator-home' LANG='C.UTF-8' LC_ALL='C.UTF-8' \
+            python3 -B /tmp/podcast-clips-recovery-2-controls/validate_preflight_report.py \
+              --expected-control-sha '${{ github.workflow_sha }}' \
+              --schema /tmp/podcast-clips-recovery-2-controls/recovery-preflight-report-v2.schema.json \
+              --lock /tmp/podcast-clips-recovery-2-controls/recovery-2-control.lock.json \
+              --report /tmp/podcast-clips-recovery-2-preflight/report-v2.json
+
+      - name: Upload only the validated constant-path report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: recovery-2-preflight-report
+          path: /tmp/podcast-clips-recovery-2-preflight/report-v2.json
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 1

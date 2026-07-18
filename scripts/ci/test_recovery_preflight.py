@@ -217,4 +217,190 @@ AttackMatrix.test_independent_androidx_and_nontransitive_attacks=_strict_propert
 InputsIsolationAndSchema.test_one_preflight_fresh_identity_and_budget_invariants=_strict_invariants
 InputsIsolationAndSchema.test_report_schema_and_constant_path_are_closed=_strict_report_tamper_rejection
 
+class Recovery2LexicalResolver(unittest.TestCase):
+    def test_exact_valid_matrix_and_common_gradle_regression(self):
+        matrix = p.resolver_matrix_results()
+        self.assertEqual(set(matrix["valid"]), set(p.R2_VALID_CASES))
+        self.assertTrue(all(value == "accepted" for value in matrix["valid"].values()))
+        declaring = "app/build.gradle"
+        target = "common.gradle"
+        entries = {
+            declaring: p.GitEntry(declaring, "blob", "100644", "1" * 40),
+            target: p.GitEntry(target, "blob", "100644", "2" * 40),
+        }
+        edge = p.resolve_static_literal(declaring, "../common.gradle", entries, 1)
+        self.assertEqual(edge, {
+            "declaring": {"path": declaring, "type": "blob", "mode": "100644", "identity": "1" * 40},
+            "literal": "../common.gradle",
+            "normalized_target": target,
+            "target": {"path": target, "type": "blob", "mode": "100644", "identity": "2" * 40},
+            "depth": 1,
+        })
+
+    def test_all_36_hostile_literals_targets_and_syntax_are_rejected(self):
+        matrix = p.resolver_matrix_results()
+        self.assertEqual(set(matrix["hostile"]), set(p.R2_HOSTILE_CASES))
+        self.assertTrue(all(value == "rejected" for value in matrix["hostile"].values()))
+
+    def test_all_10_spoofed_declaring_entries_are_rejected(self):
+        matrix = p.resolver_matrix_results()
+        self.assertEqual(set(matrix["declaring"]), set(p.R2_DECLARE_CASES))
+        self.assertTrue(all(value == "rejected" for value in matrix["declaring"].values()))
+
+    def test_multi_parent_in_root_passes_but_root_escape_fails(self):
+        values = {
+            "a/b/c/build.gradle": p.GitEntry("a/b/c/build.gradle", "blob", "100644", "1" * 40),
+            "common.gradle": p.GitEntry("common.gradle", "blob", "100644", "2" * 40),
+        }
+        self.assertEqual(
+            p.resolve_static_literal("a/b/c/build.gradle", "../../../common.gradle", values)["normalized_target"],
+            "common.gradle",
+        )
+        with self.assertRaises(p.Reject):
+            p.resolve_static_literal("a/b/c/build.gradle", "../../../../escape.gradle", values)
+
+    def test_case_unicode_type_mode_blob_symlink_and_gitlink_targets_fail(self):
+        declaring = p.GitEntry("app/build.gradle", "blob", "100644", "1" * 40)
+        attacks = [
+            {"app/build.gradle": declaring, "Common.gradle": p.GitEntry("Common.gradle", "blob", "100644", "2" * 40)},
+            {"app/build.gradle": declaring, "common.gradle": p.GitEntry("common.gradle", "tree", "040000", "2" * 40)},
+            {"app/build.gradle": declaring, "common.gradle": p.GitEntry("common.gradle", "blob", "120000", "2" * 40)},
+            {"app/build.gradle": declaring, "common.gradle": p.GitEntry("common.gradle", "commit", "160000", "2" * 40)},
+            {"app/build.gradle": declaring, "common.gradle": p.GitEntry("common.gradle", "blob", "100644", "bad")},
+        ]
+        for entries in attacks:
+            with self.subTest(entries=entries), self.assertRaises(p.Reject):
+                p.resolve_static_literal("app/build.gradle", "../common.gradle", entries)
+
+    def test_no_filesystem_resolution_or_link_following_surface(self):
+        forbidden = {"realpath", "resolve", "stat", "readlink", "submodule"}
+        names = set(p.resolve_static_literal.__code__.co_names)
+        self.assertTrue(forbidden.isdisjoint(names))
+
+
+class Recovery2GraphTraversal(unittest.TestCase):
+    @staticmethod
+    def graph(mapping):
+        contents = {}
+        entries = {}
+        for path, target in mapping.items():
+            data = b"// leaf\n" if target is None else f'apply from: "{target}"\n'.encode()
+            contents[path] = data
+            entries[path] = p.GitEntry(path, "blob", "100644", p.git_blob_sha(data))
+        return contents, entries
+
+    def test_direct_two_node_and_indirect_cycles_fail(self):
+        graphs = [
+            {"a.gradle": "a.gradle"},
+            {"a.gradle": "b.gradle", "b.gradle": "a.gradle"},
+            {"a.gradle": "b.gradle", "b.gradle": "c.gradle", "c.gradle": "b.gradle"},
+        ]
+        for graph in graphs:
+            contents, entries = self.graph(graph)
+            with self.subTest(graph=graph), self.assertRaisesRegex(p.Reject, "cycle"):
+                p.scan_static_graph(contents, entries, ["a.gradle"])
+
+    def test_diamond_acyclic_graph_passes_and_binds_every_edge(self):
+        contents = {
+            "a.gradle": b'apply from: "b.gradle"\napply from: "c.gradle"\n',
+            "b.gradle": b'apply from: "d.gradle"\n',
+            "c.gradle": b'apply from: "d.gradle"\n',
+            "d.gradle": b"// leaf\n",
+        }
+        entries = {
+            path: p.GitEntry(path, "blob", "100644", p.git_blob_sha(data))
+            for path, data in contents.items()
+        }
+        report = p.scan_static_graph(contents, entries, ["a.gradle"])
+        self.assertEqual(len(report["static_include_edges"]), 4)
+        self.assertEqual(report["unresolved"], [])
+
+    def test_depth_32_passes_and_edge_33_fails(self):
+        def chain(edges):
+            mapping = {f"d{index}.gradle": f"d{index + 1}.gradle" for index in range(edges)}
+            mapping[f"d{edges}.gradle"] = None
+            return self.graph(mapping)
+        contents, entries = chain(32)
+        report = p.scan_static_graph(contents, entries, ["d0.gradle"])
+        self.assertEqual(report["max_depth"], 32)
+        contents, entries = chain(33)
+        with self.assertRaisesRegex(p.Reject, "depth exceeds 32"):
+            p.scan_static_graph(contents, entries, ["d0.gradle"])
+
+    def test_deduplicated_target_still_validates_each_incoming_tuple(self):
+        contents = {
+            "a.gradle": b'apply from: "d.gradle"\n',
+            "b.gradle": b'apply from: "d.gradle"\n',
+            "d.gradle": b"// leaf\n",
+        }
+        entries = {
+            path: p.GitEntry(path, "blob", "100644", p.git_blob_sha(data))
+            for path, data in contents.items()
+        }
+        report = p.scan_static_graph(contents, entries, ["a.gradle", "b.gradle"])
+        self.assertEqual(len(report["static_include_edges"]), 2)
+        attacked = dict(entries)
+        attacked["d.gradle"] = p.GitEntry("d.gradle", "blob", "120000", entries["d.gradle"].identity)
+        with self.assertRaises(p.Reject):
+            p.scan_static_graph(contents, attacked, ["a.gradle", "b.gradle"])
+
+
+class Recovery2ScopeAndInventory(unittest.TestCase):
+    def test_closed_eight_path_categories_and_mandatory_workflow(self):
+        self.assertEqual(set(p.R2_ALLOWED_CHANGES), {
+            "scripts/ci/recovery_preflight.py",
+            "scripts/ci/test_recovery_preflight.py",
+            "scripts/ci/validate_preflight_report.py",
+            "config/recovery-preflight-report-v2.schema.json",
+            "config/recovery-2-control.lock.json",
+            ".github/workflows/preflight-recovery-2.yml",
+            "UPSTREAM.md",
+            "docs/base-selection-report.md",
+        })
+        self.assertEqual(p.R2_ALLOWED_CHANGES[p.R2_WORKFLOW_PATH], ("add", "one-shot-workflow"))
+        self.assertNotIn(p.PREFLIGHT_WORKFLOW_PATH, p.R2_ALLOWED_CHANGES)
+
+    def test_schema_report_parent_authorization_and_gate_constants(self):
+        self.assertEqual(p.R2_REPORT_SCHEMA, "podcast-clips/story1-recovery-preflight/v2")
+        self.assertEqual(p.R2_REPORT_PATH, "/tmp/podcast-clips-recovery-2-preflight/report-v2.json")
+        self.assertEqual(p.R2_PARENT, "c43ddf3409ea0ea793982f07926ce1e1a6925c82")
+        self.assertEqual(p.R2_MAX_INCLUDE_DEPTH, 32)
+        self.assertEqual(p.UPSTREAM_COMMIT, "1d2bd1c8f9d3ea46fc777a14d5a035558f07b7f7")
+        self.assertEqual(p.TASK_POLICY["thresholds"]["max_dispatches"], 3)
+        self.assertEqual(p.TASK_POLICY["thresholds"]["required_consecutive_successes"], 2)
+
+    def test_complete_pagination_accepts_101_rows_and_rejects_duplicates_or_total_drift(self):
+        original = p._public_json
+        def row(index):
+            return {"id": index, "run_attempt": 1, "event": "workflow_dispatch", "head_sha": "a" * 40,
+                    "status": "completed", "conclusion": "success", "path": p.R2_WORKFLOW_PATH,
+                    "name": p.R2_WORKFLOW_NAME}
+        pages = {
+            1: {"total_count": 101, "workflow_runs": [row(index) for index in range(1, 101)]},
+            2: {"total_count": 101, "workflow_runs": [row(101)]},
+        }
+        try:
+            p._public_json = lambda url: pages[int(url.rsplit("page=", 1)[1])]
+            rows, evidence = p._r2_paginated_runs("workflow")
+            self.assertEqual(len(rows), 101)
+            self.assertEqual(evidence["pages"], 2)
+            attacked = copy.deepcopy(pages)
+            attacked[2]["workflow_runs"] = [row(100)]
+            p._public_json = lambda url: attacked[int(url.rsplit("page=", 1)[1])]
+            with self.assertRaises(p.Reject):
+                p._r2_paginated_runs("workflow")
+            attacked = copy.deepcopy(pages)
+            attacked[2]["total_count"] = 102
+            p._public_json = lambda url: attacked[int(url.rsplit("page=", 1)[1])]
+            with self.assertRaises(p.Reject):
+                p._r2_paginated_runs("workflow")
+        finally:
+            p._public_json = original
+
+    def test_matrix_inventory_is_complete(self):
+        matrix = p.resolver_matrix_results()
+        self.assertEqual(
+            {section: len(values) for section, values in matrix.items()},
+            {"valid": 10, "hostile": 36, "declaring": 10, "recursion": 9},
+        )
 if __name__=="__main__": unittest.main(verbosity=2)

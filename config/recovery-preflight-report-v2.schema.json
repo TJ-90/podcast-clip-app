@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "podcast-clips/story1-recovery-preflight/v2",
+  "title": "Podcast Clips Story 1 Recovery-2 trusted preflight report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "authorization",
+    "historical_evidence",
+    "control",
+    "correction_diff",
+    "workflow",
+    "identity",
+    "overlay",
+    "projection",
+    "gradle_inputs",
+    "resolver",
+    "negative_tests",
+    "invariants",
+    "isolation",
+    "workflow_inventory",
+    "observations"
+  ],
+  "x-constants": {
+    "schema": "podcast-clips/story1-recovery-preflight/v2",
+    "report_path": "/tmp/podcast-clips-recovery-2-preflight/report-v2.json",
+    "parent": "c43ddf3409ea0ea793982f07926ce1e1a6925c82",
+    "legacy_workflow_id": 315057380,
+    "legacy_run_id": 29575201182,
+    "legacy_control_sha": "fc0ed383c0f4e1cf527f88d0ac3033973a379a4e",
+    "workflow_path": ".github/workflows/preflight-recovery-2.yml",
+    "workflow_name": "Recovery 2 — one-shot trusted preflight",
+    "max_include_depth": 32,
+    "candidate_max_dispatches": 3,
+    "required_consecutive_successes": 2,
+    "critical_gap_budget": 0
+  },
+  "x-section-keys": {
+    "authorization": ["active_goal_continuation", "adr_sha256", "test_addendum_sha256", "supersedes"],
+    "control": ["control_sha", "first_parent", "allowed_changes", "control_blobs", "report_schema", "report_path", "resolver_version", "max_include_depth"],
+    "workflow": ["id", "name", "path", "state", "blob", "control_sha", "run_id", "run_attempt", "event", "status"],
+    "identity": ["upstream_commit", "upstream_tree", "upstream_archive_sha256", "control_sha"],
+    "resolver": ["version", "semantics", "max_include_depth", "realpath", "follow_symlinks", "fetch_gitlinks", "edges", "max_observed_depth", "cycles", "unresolved"],
+    "workflow_inventory": ["pages", "page_counts", "total_count", "inventory_sha256", "runs"],
+    "observation": ["stage", "observed_at", "pages", "page_counts", "total_count", "inventory_sha256", "runs"]
+  },
+  "x-closed-enums": {
+    "status": ["pass"],
+    "observation_stage": ["in_workflow_start", "in_workflow_end"],
+    "correction_operation": ["add", "modify"],
+    "tuple_type": ["blob"],
+    "regular_mode": ["100644", "100755"]
+  },
+  "x-matrix-cardinality": {
+    "resolver_valid": 10,
+    "resolver_hostile": 36,
+    "declaring": 10,
+    "recursion": 9
+  }
+}
