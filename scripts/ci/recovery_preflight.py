@@ -1155,6 +1155,7 @@ def _r2_expect_reject(callable_value) -> str:
 
 def resolver_matrix_results() -> dict[str, dict[str, str]]:
     valid: dict[str, str] = {}
+    executed = _r2_execute_depth_cases()
     valid_rows = (
         ("VALID-01", "app/build.gradle", "quality.gradle", "app/quality.gradle"),
         ("VALID-02", "app/build.gradle", "../common.gradle", "common.gradle"),
@@ -1174,7 +1175,7 @@ def resolver_matrix_results() -> dict[str, dict[str, str]]:
         if resolve_static_literal(declaring, literal, entries)["normalized_target"] != target:
             raise AssertionError(f"valid resolver target mismatch: {name}")
         valid[name] = "accepted"
-    valid["VALID-10"] = "accepted"
+    valid.update(executed["valid"])
 
     hostile: dict[str, str] = {}
     declaring = "build.gradle"
@@ -1253,11 +1254,7 @@ def resolver_matrix_results() -> dict[str, dict[str, str]]:
             lambda values=values: resolve_static_literal("app/build.gradle", "../common.gradle", values)
         )
 
-    recursion = {
-        "CYCLE-01": "rejected", "CYCLE-02": "rejected", "CYCLE-03": "rejected",
-        "CYCLE-04": "accepted", "DEPTH-01": "accepted", "DEPTH-02": "accepted",
-        "DEPTH-03": "rejected", "DEPTH-04": "rejected", "DEPTH-05": "rejected",
-    }
+    recursion = executed["recursion"]
     return {"valid": valid, "hostile": hostile, "declaring": declaring_results, "recursion": recursion}
 
 def _r2_read_json(path: str) -> object:
@@ -1631,6 +1628,277 @@ def write_recovery2_report(report: Mapping[str, object], report_path: str) -> st
     with os.fdopen(descriptor, "wb") as handle:
         handle.write(data)
     return hashlib.sha256(data).hexdigest()
+
+# --- ADR-003 Amendment A: executed fixtures and append-only repair topology. ---
+R2_REJECTED_CONTROL = "44a12fa84f001f6128d20d664cfdf204d9aa03c0"
+R2_REJECTED_TREE = "af820f08079e958e29b37889830c164cb9174c51"
+R2_AMENDMENT_SHA256 = "7088e415a1b0ee5f2c777ba27e80a30a04abec0d8c90552eaacd31489f84181c"
+R2_AMENDMENT_TEST_SHA256 = "50e136ae0b2073110272328e22b7d5f269ae4c5ad73356feef6b45673d231ecd"
+R2_PATH_PROOF_SHA256 = "75f354006d3a90cc9d2d3a27cc9e49dc94e7bb44c11ef5d15a8a099e9be91564"
+R2_SCHEMA_BLOB = "41ebc6875851ad6259cf3799b470f792798a7a65"
+R2_WORKFLOW_ID = 315578096
+R2_REPAIR_PATHS = (
+    ".github/workflows/preflight-recovery-2.yml",
+    "config/recovery-2-control.lock.json",
+    "scripts/ci/recovery_preflight.py",
+    "scripts/ci/test_recovery_preflight.py",
+    "scripts/ci/validate_preflight_report.py",
+)
+R2_MATRIX_TRANSCRIPT: list[dict[str, object]] = []
+
+def _r2_fixture_graph(mapping: Mapping[str, str | None]) -> tuple[dict[str, bytes], dict[str, GitEntry]]:
+    contents, entries = {}, {}
+    for path, target in mapping.items():
+        data = b"// leaf\n" if target is None else f'apply from: "{target}"\n'.encode()
+        contents[path] = data
+        entries[path] = GitEntry(path, "blob", "100644", git_blob_sha(data))
+    return contents, entries
+
+def _r2_chain(edge_count: int, omit_terminal_bytes: bool = False):
+    mapping = {f"d{index}.gradle": f"d{index + 1}.gradle" for index in range(edge_count)}
+    mapping[f"d{edge_count}.gradle"] = None
+    contents, entries = _r2_fixture_graph(mapping)
+    if omit_terminal_bytes:
+        contents.pop(f"d{edge_count}.gradle")
+    return contents, entries
+
+def _r2_expect_graph_reject(callable_value, pattern: str) -> str:
+    try:
+        callable_value()
+    except Reject as error:
+        if pattern not in str(error):
+            raise AssertionError(f"unexpected graph rejection: {error}") from error
+        return str(error)
+    raise AssertionError("graph fixture unexpectedly passed")
+
+def _r2_valid_10() -> dict[str, object]:
+    contents, entries = _r2_chain(32)
+    observed = scan_static_graph(contents, entries, ["d0.gradle"])
+    if len(observed["static_include_edges"]) != 32 or observed["max_depth"] != 32:
+        raise AssertionError("VALID-10 did not traverse exactly 32 edges")
+    hostile_contents, hostile_entries = _r2_chain(33, True)
+    reads = []
+    def loader(path: str) -> bytes:
+        reads.append(path)
+        raise AssertionError(f"edge-33 target was read: {path}")
+    rejection = _r2_expect_graph_reject(
+        lambda: scan_static_graph(hostile_contents, hostile_entries, ["d0.gradle"], loader),
+        "depth exceeds 32",
+    )
+    if reads:
+        raise AssertionError("edge-33 target bytes were accessed")
+    return {"edges": 32, "max_depth": 32, "edge_33": rejection, "target_33_reads": 0}
+
+def _r2_cycle_case(mapping: Mapping[str, str | None], root: str, expected_cycle: str) -> dict[str, object]:
+    contents, entries = _r2_fixture_graph(mapping)
+    rejection = _r2_expect_graph_reject(
+        lambda: scan_static_graph(contents, entries, [root]), expected_cycle
+    )
+    return {"cycle": rejection}
+
+def _r2_diamond_case() -> dict[str, object]:
+    contents = {
+        "a.gradle": b'apply from: "b.gradle"\napply from: "c.gradle"\n',
+        "b.gradle": b'apply from: "d.gradle"\n',
+        "c.gradle": b'apply from: "d.gradle"\n',
+        "d.gradle": b"// leaf\n",
+    }
+    entries = {path: GitEntry(path, "blob", "100644", git_blob_sha(data)) for path, data in contents.items()}
+    observed = scan_static_graph(contents, entries, ["a.gradle"])
+    if len(observed["static_include_edges"]) != 4:
+        raise AssertionError("diamond did not validate all incoming edges")
+    return {"edges": 4, "max_depth": observed["max_depth"]}
+
+def _r2_leaf_case() -> dict[str, object]:
+    contents, entries = _r2_fixture_graph({"root.gradle": None})
+    observed = scan_static_graph(contents, entries, ["root.gradle"])
+    if observed["max_depth"] != 0 or observed["static_include_edges"]:
+        raise AssertionError("depth-zero fixture changed")
+    return {"edges": 0, "max_depth": 0}
+
+def _r2_depth_32_case() -> dict[str, object]:
+    contents, entries = _r2_chain(32)
+    observed = scan_static_graph(contents, entries, ["d0.gradle"])
+    if len(observed["static_include_edges"]) != 32 or observed["max_depth"] != 32:
+        raise AssertionError("depth-32 fixture changed")
+    return {"edges": 32, "max_depth": 32}
+
+def _r2_depth_33_case() -> dict[str, object]:
+    contents, entries = _r2_chain(33, True)
+    reads = []
+    def loader(path: str) -> bytes:
+        reads.append(path)
+        raise AssertionError(f"depth-33 target was read: {path}")
+    rejection = _r2_expect_graph_reject(
+        lambda: scan_static_graph(contents, entries, ["d0.gradle"], loader),
+        "depth exceeds 32",
+    )
+    if reads:
+        raise AssertionError("depth-33 target bytes were accessed")
+    return {"edge_33": rejection, "target_33_reads": 0}
+
+def _r2_depth_cycle_case() -> dict[str, object]:
+    mapping = {f"d{index}.gradle": f"d{index + 1}.gradle" for index in range(31)}
+    mapping["d31.gradle"] = "d1.gradle"
+    return _r2_cycle_case(mapping, "d0.gradle", "d1.gradle -> d2.gradle")
+
+def _r2_dedupe_mismatch_case() -> dict[str, object]:
+    contents = {
+        "a.gradle": b'apply from: "d.gradle"\n',
+        "b.gradle": b'apply from: "d.gradle"\n',
+        "d.gradle": b"// leaf\n",
+    }
+    entries = {path: GitEntry(path, "blob", "100644", git_blob_sha(data)) for path, data in contents.items()}
+    observed = scan_static_graph(contents, entries, ["a.gradle", "b.gradle"])
+    if len(observed["static_include_edges"]) != 2:
+        raise AssertionError("deduplicated target hid an incoming edge")
+    attacked = dict(entries)
+    attacked["d.gradle"] = GitEntry("d.gradle", "blob", "120000", entries["d.gradle"].identity)
+    rejection = _r2_expect_graph_reject(
+        lambda: resolve_static_literal("b.gradle", "d.gradle", attacked, 1),
+        "not an exact pinned regular blob",
+    )
+    return {"edges": 2, "mismatch": rejection}
+
+def _r2_execute_depth_cases() -> dict[str, dict[str, str]]:
+    global R2_MATRIX_TRANSCRIPT
+    cases = (
+        {"id": "VALID-10", "expected": "accepted", "run": _r2_valid_10},
+        {"id": "CYCLE-01", "expected": "rejected", "run": lambda: _r2_cycle_case(
+            {"a.gradle": "a.gradle"}, "a.gradle", "a.gradle -> a.gradle")},
+        {"id": "CYCLE-02", "expected": "rejected", "run": lambda: _r2_cycle_case(
+            {"a.gradle": "b.gradle", "b.gradle": "a.gradle"}, "a.gradle", "a.gradle -> b.gradle -> a.gradle")},
+        {"id": "CYCLE-03", "expected": "rejected", "run": lambda: _r2_cycle_case(
+            {"a.gradle": "b.gradle", "b.gradle": "c.gradle", "c.gradle": "b.gradle"},
+            "a.gradle", "b.gradle -> c.gradle -> b.gradle")},
+        {"id": "CYCLE-04", "expected": "accepted", "run": _r2_diamond_case},
+        {"id": "DEPTH-01", "expected": "accepted", "run": _r2_leaf_case},
+        {"id": "DEPTH-02", "expected": "accepted", "run": _r2_depth_32_case},
+        {"id": "DEPTH-03", "expected": "rejected", "run": _r2_depth_33_case},
+        {"id": "DEPTH-04", "expected": "rejected", "run": _r2_depth_cycle_case},
+        {"id": "DEPTH-05", "expected": "rejected", "run": _r2_dedupe_mismatch_case},
+    )
+    transcript, outcomes = [], {}
+    for ordinal, case in enumerate(cases, 1):
+        detail = case["run"]()
+        outcome = case["expected"]
+        outcomes[case["id"]] = outcome
+        transcript.append({"ordinal": ordinal, "case": case["id"], "outcome": outcome, "detail": detail})
+    if [row["case"] for row in transcript] != [case["id"] for case in cases]:
+        raise AssertionError("parameterized fixture order changed")
+    R2_MATRIX_TRANSCRIPT = transcript
+    return {
+        "valid": {cases[0]["id"]: outcomes[cases[0]["id"]]},
+        "recursion": {case["id"]: outcomes[case["id"]] for case in cases[1:]},
+    }
+
+_r2_validate_lock_v1 = _r2_validate_lock
+
+def _r2_validate_lock(lock: Mapping[str, object], schema: Mapping[str, object]) -> None:
+    _r2_validate_lock_v1(lock, schema)
+    if set(lock) != {
+        "schema", "authorization", "parent", "amendment", "allowed_changes",
+        "controls", "workflow", "report", "resolver", "historical", "gates",
+    }:
+        raise Reject("Amendment A lock envelope changed")
+    amendment = {
+        "adr_amendment_sha256": R2_AMENDMENT_SHA256,
+        "test_addendum_sha256": R2_AMENDMENT_TEST_SHA256,
+        "path_proof_sha256": R2_PATH_PROOF_SHA256,
+        "aggregate_parent": R2_PARENT,
+        "rejected_control": R2_REJECTED_CONTROL,
+        "rejected_tree": R2_REJECTED_TREE,
+        "repair_parent": R2_REJECTED_CONTROL,
+        "incremental_paths": list(R2_REPAIR_PATHS),
+        "schema_blob": R2_SCHEMA_BLOB,
+        "workflow_id": R2_WORKFLOW_ID,
+        "zero_runs_required": True,
+    }
+    if lock.get("amendment") != amendment:
+        raise Reject("Amendment A authorization changed")
+    controls = lock.get("controls")
+    required = {
+        "scripts/ci/recovery_preflight.py", "scripts/ci/test_recovery_preflight.py",
+        "scripts/ci/validate_preflight_report.py", "config/recovery-preflight-report-v2.schema.json",
+    }
+    if not isinstance(controls, Mapping) or set(controls) != required:
+        raise Reject("Amendment A control set changed")
+    if controls.get("config/recovery-preflight-report-v2.schema.json") != R2_SCHEMA_BLOB:
+        raise Reject("Amendment A schema blob changed")
+    if not all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value) for value in controls.values()):
+        raise Reject("Amendment A control identity invalid")
+
+def _r2_validate_correction_diff(control_sha: str, lock: Mapping[str, object]) -> list[dict[str, object]]:
+    api = f"https://api.github.com/repos/{TARGET_REPOSITORY}"
+    commit = _public_json(f"{api}/git/commits/{control_sha}")
+    if [row.get("sha") for row in commit.get("parents", [])] != [R2_REJECTED_CONTROL]:
+        raise Reject("Amendment A repair parent changed")
+    rejected = _public_json(f"{api}/git/commits/{R2_REJECTED_CONTROL}")
+    if [row.get("sha") for row in rejected.get("parents", [])] != [R2_PARENT]:
+        raise Reject("Amendment A rejected-control parent changed")
+    if rejected.get("tree", {}).get("sha") != R2_REJECTED_TREE:
+        raise Reject("Amendment A rejected-control tree changed")
+    incremental = _public_json(f"{api}/compare/{R2_REJECTED_CONTROL}...{control_sha}")
+    if incremental.get("ahead_by") != 1 or incremental.get("total_commits") != 1:
+        raise Reject("Amendment A must be exactly one append-only repair")
+    incremental_files = incremental.get("files")
+    if not isinstance(incremental_files, list) or {row.get("filename") for row in incremental_files} != set(R2_REPAIR_PATHS):
+        raise Reject("Amendment A incremental path set changed")
+    rejected_tree = _parse_any_tree(
+        _public_json(f"{api}/git/trees/{R2_REJECTED_TREE}?recursive=1"), R2_REJECTED_TREE)
+    control_root = commit.get("tree", {}).get("sha")
+    control_tree = _parse_any_tree(
+        _public_json(f"{api}/git/trees/{control_root}?recursive=1"), control_root)
+    for row in incremental_files:
+        path = row.get("filename")
+        old, new = rejected_tree.get(path), control_tree.get(path)
+        if row.get("status") != "modified" or old is None or new is None:
+            raise Reject(f"Amendment A operation changed: {path}")
+        if old.type != "blob" or new.type != "blob" or old.mode != "100644" or new.mode != "100644":
+            raise Reject(f"Amendment A tuple changed type/mode: {path}")
+        if row.get("sha") != new.identity:
+            raise Reject(f"Amendment A compare identity changed: {path}")
+    schema_path = "config/recovery-preflight-report-v2.schema.json"
+    if control_tree.get(schema_path) != rejected_tree.get(schema_path) or control_tree[schema_path].identity != R2_SCHEMA_BLOB:
+        raise Reject("Amendment A schema changed")
+    aggregate = _public_json(f"{api}/compare/{R2_PARENT}...{control_sha}")
+    if aggregate.get("ahead_by") != 2 or aggregate.get("total_commits") != 2:
+        raise Reject("Amendment A aggregate chain changed")
+    files = aggregate.get("files")
+    if not isinstance(files, list) or not files:
+        raise Reject("Amendment A aggregate diff missing")
+    changed = {row.get("filename") for row in files}
+    if R2_WORKFLOW_PATH not in changed or not changed <= set(R2_ALLOWED_CHANGES):
+        raise Reject("Amendment A aggregate path set escaped ADR-003")
+    expected_lock = [
+        {"path": path, "operation": operation, "category": category}
+        for path, (operation, category) in sorted(R2_ALLOWED_CHANGES.items())
+    ]
+    if lock.get("allowed_changes") != expected_lock:
+        raise Reject("Amendment A aggregate allowlist changed")
+    parent_commit = _public_json(f"{api}/git/commits/{R2_PARENT}")
+    parent_root = parent_commit["tree"]["sha"]
+    old_tree = _parse_any_tree(_public_json(f"{api}/git/trees/{parent_root}?recursive=1"), parent_root)
+    if old_tree.get(PREFLIGHT_WORKFLOW_PATH) != control_tree.get(PREFLIGHT_WORKFLOW_PATH):
+        raise Reject("legacy workflow tuple changed")
+    if old_tree[PREFLIGHT_WORKFLOW_PATH].identity != LEGACY_PREFLIGHT_BLOB:
+        raise Reject("legacy workflow blob changed")
+    result, by_path = [], {row["path"]: row for row in expected_lock}
+    for item in sorted(files, key=lambda row: row["filename"]):
+        path, rule = item["filename"], by_path[item["filename"]]
+        expected_status = "added" if rule["operation"] == "add" else "modified"
+        if item.get("status") != expected_status:
+            raise Reject(f"Amendment A aggregate operation mismatch: {path}")
+        new, old = control_tree.get(path), old_tree.get(path)
+        if new is None or new.type != "blob" or new.mode != "100644" or item.get("sha") != new.identity:
+            raise Reject(f"Amendment A aggregate new tuple invalid: {path}")
+        if rule["operation"] == "add" and old is not None:
+            raise Reject(f"Amendment A aggregate addition already existed: {path}")
+        if rule["operation"] == "modify" and (old is None or old.type != "blob" or old.mode != "100644"):
+            raise Reject(f"Amendment A aggregate old tuple invalid: {path}")
+        result.append({"path": path, "operation": rule["operation"], "category": rule["category"],
+                       "old": None if old is None else _r2_tuple(old), "new": _r2_tuple(new)})
+    return result
 
 def main() -> None:
     parser = argparse.ArgumentParser()

@@ -10,6 +10,8 @@ import unittest
 from dataclasses import asdict
 
 import recovery_preflight as p
+import validate_preflight_report as v
+import unicodedata
 
 COMMON = b'''android {\n defaultConfig { resValue "string", "app_name", "AntennaPod" }\n buildTypes { debug { resValue "string", "app_name", "AntennaPod Debug" } }\n}\n'''
 
@@ -403,4 +405,336 @@ class Recovery2ScopeAndInventory(unittest.TestCase):
             {section: len(values) for section, values in matrix.items()},
             {"valid": 10, "hostile": 36, "declaring": 10, "recursion": 9},
         )
+# --- ADR-003 Amendment A independent oracle and mutation tests. ---
+class AmendmentAExecutedFixtures(unittest.TestCase):
+    def test_matrix_cases_are_executed_and_transcript_is_derived(self):
+        matrix = p.resolver_matrix_results()
+        transcript = p.R2_MATRIX_TRANSCRIPT
+        self.assertEqual([row["ordinal"] for row in transcript], list(range(1, 11)))
+        self.assertEqual(
+            [row["case"] for row in transcript],
+            ["VALID-10", "CYCLE-01", "CYCLE-02", "CYCLE-03", "CYCLE-04",
+             "DEPTH-01", "DEPTH-02", "DEPTH-03", "DEPTH-04", "DEPTH-05"],
+        )
+        self.assertEqual(transcript[0]["detail"]["edges"], 32)
+        self.assertEqual(transcript[0]["detail"]["target_33_reads"], 0)
+        self.assertIn("a.gradle -> b.gradle -> a.gradle", transcript[2]["detail"]["cycle"])
+        self.assertEqual({row["case"] for row in transcript[1:]}, set(matrix["recursion"]))
+
+    def test_parameterized_execution_cannot_be_replaced_by_labels(self):
+        original = p._r2_valid_10
+        calls = []
+        def wrapped():
+            calls.append("VALID-10")
+            return original()
+        p._r2_valid_10 = wrapped
+        try:
+            p.resolver_matrix_results()
+        finally:
+            p._r2_valid_10 = original
+        self.assertEqual(calls, ["VALID-10"])
+        self.assertEqual(len(p.R2_MATRIX_TRANSCRIPT), 10)
+
+def amendment_independent_resolve(declaring, literal, origin):
+    if not literal or "\\" in literal or "\0" in literal or literal.startswith("/"):
+        raise ValueError("hostile literal")
+    if unicodedata.normalize("NFC", literal) != literal:
+        raise ValueError("non-NFC")
+    base = declaring.split("/")[:-1]
+    for part in literal.split("/"):
+        if part in {"", "."}:
+            raise ValueError("empty/dot")
+        if part == "..":
+            if not base:
+                raise ValueError("escape")
+            base.pop()
+        else:
+            base.append(part)
+    path = "/".join(base)
+    if path not in origin:
+        raise ValueError("missing")
+    return path
+
+def amendment_fixture_report():
+    contents = {
+        "a.gradle": b'apply from: "b.gradle"\napply from: "c.gradle"\n',
+        "b.gradle": b"// leaf\n",
+        "c.gradle": b"// leaf\n",
+    }
+    origin = {
+        path: {"path": path, "type": "blob", "mode": "100644", "identity": p.git_blob_sha(data)}
+        for path, data in contents.items()
+    }
+    edges = []
+    for target in ("b.gradle", "c.gradle"):
+        resolved = amendment_independent_resolve("a.gradle", target, origin)
+        edges.append({
+            "declaring": copy.deepcopy(origin["a.gradle"]),
+            "literal": target,
+            "normalized_target": resolved,
+            "target": copy.deepcopy(origin[resolved]),
+            "depth": 1,
+        })
+    report = {
+        "resolver": {
+            "version": 2, "semantics": "declaring-relative-posix-lexical",
+            "max_include_depth": 32, "realpath": False, "follow_symlinks": False,
+            "fetch_gitlinks": False, "edges": edges, "max_observed_depth": 1,
+            "cycles": [], "unresolved": [],
+        },
+        "gradle_inputs": {"known_inventory": {"fixture": ["a.gradle"]}},
+    }
+    return report, origin, contents
+
+class AmendmentAIndependentEdgeOracle(unittest.TestCase):
+    def test_exact_edges_and_all_endpoint_order_canaries(self):
+        report, origin, contents = amendment_fixture_report()
+        old_loader = v._AMEND_CONTENT_LOADER
+        v._AMEND_CONTENT_LOADER = lambda path: contents[path]
+        try:
+            v.validate_resolver(report, origin)
+            attacks = []
+            def mutate(index, side, field, value):
+                item = copy.deepcopy(report)
+                item["resolver"]["edges"][index][side][field] = value
+                attacks.append(item)
+            mutate(0, "target", "identity", "9" * 40)
+            mutate(0, "target", "mode", "100755")
+            mutate(0, "target", "type", "tree")
+            mutate(0, "declaring", "identity", "8" * 40)
+            mutate(0, "declaring", "path", "missing.gradle")
+            mutate(0, "target", "path", "B.gradle")
+            mutate(0, "target", "path", "Gra\u0301dle.gradle")
+            omitted = copy.deepcopy(report); omitted["resolver"]["edges"].pop(); attacks.append(omitted)
+            duplicate = copy.deepcopy(report); duplicate["resolver"]["edges"].append(copy.deepcopy(duplicate["resolver"]["edges"][0])); attacks.append(duplicate)
+            extra = copy.deepcopy(report); extra["resolver"]["edges"].append(copy.deepcopy(extra["resolver"]["edges"][1])); attacks.append(extra)
+            reordered = copy.deepcopy(report); reordered["resolver"]["edges"].reverse(); attacks.append(reordered)
+            for index, attacked in enumerate(attacks):
+                with self.subTest(canary=index), self.assertRaises(v.Reject):
+                    v.validate_resolver(attacked, origin)
+        finally:
+            v._AMEND_CONTENT_LOADER = old_loader
+
+    def test_false_projection_rejected_against_independent_2028_digest(self):
+        upstream = full_inventory()
+        origins = [p._r2_tuple(upstream[path]) for path in sorted(upstream)]
+        mappings = [{"origin": copy.deepcopy(row), "projected": copy.deepcopy(row)} for row in origins]
+        rows = p._expected_overlay_rows()
+        report = {
+            "overlay": {"entries": rows, "policy_digest": v.digest(rows)},
+            "projection": {
+                "upstream_tuple_count": 2028, "upstream_tree_count": 745,
+                "upstream_digest": v.rows_digest(origins),
+                "projected_tuple_count": 2028, "projected_digest": v.rows_digest(origins),
+                "origin_projection": mappings, "projected_manifest": copy.deepcopy(origins),
+            },
+        }
+        old_digest = v.UP_DIGEST
+        v.UP_DIGEST = v.rows_digest(origins)
+        try:
+            observed = v.validate_projection(report)
+            self.assertEqual(len(observed), 2028)
+            attacked = copy.deepcopy(report)
+            attacked["projection"]["origin_projection"][0]["origin"]["identity"] = "9" * 40
+            with self.assertRaises(v.Reject):
+                v.validate_projection(attacked)
+        finally:
+            v.UP_DIGEST = old_digest
+
+def amendment_lock():
+    return {
+        "schema": v.LOCK_SCHEMA,
+        "authorization": {
+            "active_goal_continuation": True,
+            "adr_sha256": v.ADR_SHA256,
+            "test_addendum_sha256": v.TEST_ADDENDUM_SHA256,
+            "supersedes": "G009 no-corrected-preflight constraint only",
+        },
+        "parent": v.PARENT,
+        "amendment": {
+            "adr_amendment_sha256": v.AMENDMENT_SHA256,
+            "test_addendum_sha256": v.AMENDMENT_TEST_SHA256,
+            "path_proof_sha256": v.PATH_PROOF_SHA256,
+            "aggregate_parent": v.PARENT,
+            "rejected_control": v.REJECTED_CONTROL,
+            "rejected_tree": v.REJECTED_TREE,
+            "repair_parent": v.REJECTED_CONTROL,
+            "incremental_paths": list(v.REPAIR_PATHS),
+            "schema_blob": v.SCHEMA_BLOB,
+            "workflow_id": v.WORKFLOW_ID,
+            "zero_runs_required": True,
+        },
+        "allowed_changes": v.expected_allowed_changes(),
+        "controls": {
+            "scripts/ci/recovery_preflight.py": "1" * 40,
+            "scripts/ci/test_recovery_preflight.py": "2" * 40,
+            "scripts/ci/validate_preflight_report.py": "3" * 40,
+            "config/recovery-preflight-report-v2.schema.json": v.SCHEMA_BLOB,
+        },
+        "workflow": {"path": v.WORKFLOW_PATH, "name": v.WORKFLOW_NAME, "trigger": "workflow_dispatch", "permissions": {}},
+        "report": {"schema": v.SCHEMA_ID, "path": v.REPORT_PATH},
+        "resolver": {"version": 2, "semantics": "declaring-relative-posix-lexical", "max_include_depth": 32, "realpath": False, "follow_symlinks": False, "fetch_gitlinks": False},
+        "historical": {
+            "g001": "failed-attempt-1", "g009": "failed-attempt-1", "g002": "pending",
+            "evidence_commit": v.EVIDENCE, "terminal_report_commit": v.PARENT,
+            "legacy_workflow_id": v.LEGACY_WORKFLOW_ID, "legacy_run_id": v.LEGACY_RUN_ID,
+            "legacy_control_sha": v.LEGACY_CONTROL, "legacy_artifacts": 0,
+        },
+        "gates": {
+            "upstream_commit": v.UP_COMMIT, "upstream_tree": v.UP_TREE,
+            "archive_sha256": v.ARCHIVE, "candidate_max_dispatches": 3,
+            "required_consecutive_successes": 2, "critical_gap_budget": 0,
+            "max_minutes": 25, "run2_failure_stop": True,
+        },
+    }
+
+def amendment_full_report():
+    lock = amendment_lock()
+    upstream = full_inventory()
+    contents = known_contents()
+    for path, data in contents.items():
+        upstream[path] = p.GitEntry(path, "blob", "100644", p.git_blob_sha(data))
+    origins = [p._r2_tuple(upstream[path]) for path in sorted(upstream)]
+    mappings = [{"origin": copy.deepcopy(row), "projected": copy.deepcopy(row)} for row in origins]
+    roots = sorted(set().union(*(set(value) for value in p.KNOWN_INPUTS.values())))
+    detailed = p.scan_static_graph(contents, upstream, roots)
+    overlay_rows = p._expected_overlay_rows()
+    control_sha = "a" * 40
+    run = {
+        "id": 9001, "run_attempt": 1, "event": "workflow_dispatch",
+        "head_sha": control_sha, "status": "in_progress", "conclusion": None,
+        "path": v.WORKFLOW_PATH, "name": v.WORKFLOW_NAME,
+    }
+    inventory = {
+        "pages": 1, "page_counts": [1], "total_count": 1,
+        "inventory_sha256": v.digest([run]), "runs": [run],
+    }
+    legacy = {
+        "workflow_id": v.LEGACY_WORKFLOW_ID, "workflow_path": v.LEGACY_WORKFLOW_PATH,
+        "workflow_name": v.LEGACY_WORKFLOW_NAME, "workflow_blob": v.LEGACY_WORKFLOW_BLOB,
+        "run_id": v.LEGACY_RUN_ID, "run_attempt": 1, "event": "workflow_dispatch",
+        "head_sha": v.LEGACY_CONTROL, "status": "completed", "conclusion": "failure",
+        "artifacts": 0, "error": "Reject: non-canonical Git path: '../common.gradle'",
+        "inventory": {"total_count": 1},
+    }
+    report = {
+        "schema": v.SCHEMA_ID, "status": "pass",
+        "authorization": copy.deepcopy(lock["authorization"]),
+        "historical_evidence": {
+            "evidence_commit": v.EVIDENCE, "terminal_report_commit": v.PARENT,
+            "goals": {"G001": "failed-attempt-1", "G009": "failed-attempt-1", "G002": "pending"},
+            "legacy_preflight": legacy, "candidate_refs": copy.deepcopy(v.REFS),
+            "pull_request": copy.deepcopy(v.PR), "validation_runs": copy.deepcopy(v.RUNS),
+            "immutable": True,
+        },
+        "control": {
+            "control_sha": control_sha, "first_parent": v.PARENT,
+            "allowed_changes": copy.deepcopy(lock["allowed_changes"]),
+            "control_blobs": copy.deepcopy(lock["controls"]), "report_schema": v.SCHEMA_ID,
+            "report_path": v.REPORT_PATH, "resolver_version": 2, "max_include_depth": 32,
+        },
+        "correction_diff": [{
+            "path": v.WORKFLOW_PATH, "operation": "add", "category": "one-shot-workflow",
+            "old": None,
+            "new": {"path": v.WORKFLOW_PATH, "type": "blob", "mode": "100644", "identity": "4" * 40},
+        }],
+        "workflow": {
+            "id": v.WORKFLOW_ID, "name": v.WORKFLOW_NAME, "path": v.WORKFLOW_PATH,
+            "state": "active", "blob": "5" * 40, "control_sha": control_sha,
+            "run_id": 9001, "run_attempt": 1, "event": "workflow_dispatch", "status": "in_progress",
+        },
+        "identity": {
+            "upstream_commit": v.UP_COMMIT, "upstream_tree": v.UP_TREE,
+            "upstream_archive_sha256": v.ARCHIVE, "control_sha": control_sha,
+        },
+        "overlay": {"entries": overlay_rows, "policy_digest": v.digest(overlay_rows)},
+        "projection": {
+            "upstream_tuple_count": 2028, "upstream_tree_count": 745,
+            "upstream_digest": v.rows_digest(origins), "projected_tuple_count": 2028,
+            "projected_digest": v.rows_digest(origins), "origin_projection": mappings,
+            "projected_manifest": copy.deepcopy(origins),
+        },
+        "gradle_inputs": {
+            "known_inventory": copy.deepcopy(p.KNOWN_INPUTS),
+            "dynamic_inputs": p.scan_dynamic_inputs(contents, upstream),
+            "gradle_properties_blob": v.PROPS, "wrapper_distribution_sha256": v.DIST,
+            "wrapper_jar_sha256": v.JAR,
+        },
+        "resolver": {
+            "version": 2, "semantics": "declaring-relative-posix-lexical",
+            "max_include_depth": 32, "realpath": False, "follow_symlinks": False,
+            "fetch_gitlinks": False, "edges": detailed["static_include_edges"],
+            "max_observed_depth": detailed["max_depth"], "cycles": [], "unresolved": [],
+        },
+        "negative_tests": {
+            "tuples": {name: "rejected" for name in v.TUPLES},
+            "gradle_properties": {name: "rejected" for name in v.PROPERTIES},
+            "recovery_scope": {name: "rejected" for name in v.SCOPE},
+            "resolver_valid": {name: "accepted" for name in v.VALID},
+            "resolver_hostile": {name: "rejected" for name in v.HOSTILE},
+            "declaring": {name: "rejected" for name in v.DECLARE},
+            "recursion": {name: ("accepted" if name in {"CYCLE-04", "DEPTH-01", "DEPTH-02"} else "rejected") for name in v.RECURSION},
+        },
+        "invariants": {
+            "legacy_preflight": {
+                "workflow_id": v.LEGACY_WORKFLOW_ID, "run_id": v.LEGACY_RUN_ID,
+                "run_attempt": 1, "head_sha": v.LEGACY_CONTROL,
+                "conclusion": "failure", "artifacts": 0,
+            },
+            "recovery2_preflight": {
+                "maximum_runs": 1, "prior_runs": 0, "required_run_attempt": 1,
+                "candidate_created": False,
+            },
+            "candidate_gate": copy.deepcopy(lock["gates"]),
+        },
+        "isolation": {
+            "sanitized_environment": True, "candidate_workspace": "absent",
+            "credential_channels": "absent", "runtime_cache_result_channels": "absent-from-parser",
+            "constant_report_path": v.REPORT_PATH, "checkout": False,
+            "android_gradle_execution": False, "realpath": False,
+            "follow_symlinks": False, "fetch_gitlinks": False,
+        },
+        "workflow_inventory": copy.deepcopy(inventory),
+        "observations": [
+            {"stage": "in_workflow_start", "observed_at": "2026-07-18T00:00:00Z", **copy.deepcopy(inventory)},
+            {"stage": "in_workflow_end", "observed_at": "2026-07-18T00:00:01Z", **copy.deepcopy(inventory)},
+        ],
+    }
+    return report, lock, contents, origins
+
+class AmendmentAFullValidatorRegression(unittest.TestCase):
+    def test_target_identity_only_mutation_fails_full_validate_report(self):
+        report, lock, contents, origins = amendment_full_report()
+        old_digest, old_loader = v.UP_DIGEST, v._AMEND_CONTENT_LOADER
+        v.UP_DIGEST = v.rows_digest(origins)
+        v._AMEND_CONTENT_LOADER = lambda path: contents[path]
+        try:
+            v.validate_report(report, "a" * 40, lock)
+            attacked = copy.deepcopy(report)
+            attacked["resolver"]["edges"][0]["target"]["identity"] = "9" * 40
+            with self.assertRaises(v.Reject):
+                v.validate_report(attacked, "a" * 40, lock)
+        finally:
+            v.UP_DIGEST, v._AMEND_CONTENT_LOADER = old_digest, old_loader
+
+    def test_always_pass_validator_is_caught_by_meta_canary(self):
+        report, lock, contents, origins = amendment_full_report()
+        attacked = copy.deepcopy(report)
+        attacked["resolver"]["edges"][0]["target"]["identity"] = "9" * 40
+        old_digest, old_loader, old_validator = v.UP_DIGEST, v._AMEND_CONTENT_LOADER, v.validate_resolver
+        v.UP_DIGEST = v.rows_digest(origins)
+        v._AMEND_CONTENT_LOADER = lambda path: contents[path]
+        v.validate_resolver = lambda *_args, **_kwargs: None
+        def require_reject():
+            try:
+                v.validate_report(attacked, "a" * 40, lock)
+            except v.Reject:
+                return
+            raise AssertionError("always-pass validator accepted target mutation")
+        try:
+            with self.assertRaises(AssertionError):
+                require_reject()
+        finally:
+            v.UP_DIGEST, v._AMEND_CONTENT_LOADER, v.validate_resolver = old_digest, old_loader, old_validator
+
 if __name__=="__main__": unittest.main(verbosity=2)

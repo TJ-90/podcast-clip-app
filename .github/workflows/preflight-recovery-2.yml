@@ -35,7 +35,9 @@ jobs:
           import hashlib, json, os, re, time, urllib.request
           from datetime import datetime, timezone
 
-          PARENT="c43ddf3409ea0ea793982f07926ce1e1a6925c82"
+          AGGREGATE_PARENT="c43ddf3409ea0ea793982f07926ce1e1a6925c82"
+          REJECTED_CONTROL="44a12fa84f001f6128d20d664cfdf204d9aa03c0"
+          REJECTED_TREE="af820f08079e958e29b37889830c164cb9174c51"
           OLD_ID=315057380
           OLD_RUN=29575201182
           OLD_SHA="fc0ed383c0f4e1cf527f88d0ac3033973a379a4e"
@@ -84,8 +86,13 @@ jobs:
           if public_json(f"{api}/branches/main")["commit"]["sha"]!=sha:
               raise SystemExit("main is not the immutable correction SHA")
           commit=public_json(f"{api}/git/commits/{sha}")
-          if [row.get("sha") for row in commit.get("parents",[])]!=[PARENT]:
-              raise SystemExit("correction parent changed")
+          if [row.get("sha") for row in commit.get("parents",[])]!=[REJECTED_CONTROL]:
+              raise SystemExit("repair parent changed")
+          rejected=public_json(f"{api}/git/commits/{REJECTED_CONTROL}")
+          if [row.get("sha") for row in rejected.get("parents",[])]!=[AGGREGATE_PARENT]:
+              raise SystemExit("rejected-control parent changed")
+          if rejected.get("tree",{}).get("sha")!=REJECTED_TREE:
+              raise SystemExit("rejected-control tree changed")
           old=public_json(f"{api}/actions/workflows/{OLD_ID}")
           if {key:old.get(key) for key in ("id","name","path","state")}!={"id":OLD_ID,"name":OLD_NAME,"path":OLD_PATH,"state":"active"}:
               raise SystemExit("legacy workflow identity changed")
@@ -132,11 +139,11 @@ jobs:
           root="/tmp/podcast-clips-recovery-2-controls"
           os.mkdir(root,0o700)
           expected={
-              "scripts/ci/recovery_preflight.py":"ddb06661926bdd4b1242495bd745a9fac1023330",
-              "scripts/ci/test_recovery_preflight.py":"cb133590469f1667013bea74730caa7f07fbcd29",
-              "scripts/ci/validate_preflight_report.py":"3fab41a0ade50f8b88af79081740378743c0c1d4",
+              "scripts/ci/recovery_preflight.py":"519b024c519db1d62460413086a7754f78d941c4",
+              "scripts/ci/test_recovery_preflight.py":"ccfcaef253d56e30e69b0107818fc8587aeed1ea",
+              "scripts/ci/validate_preflight_report.py":"0c22f6dcba6182d7aa04f25955861de8a02eadb8",
               "config/recovery-preflight-report-v2.schema.json":"41ebc6875851ad6259cf3799b470f792798a7a65",
-              "config/recovery-2-control.lock.json":"809f9aafa026c9c99d475a9202740e9b18e19ad3",
+              "config/recovery-2-control.lock.json":"d1208879130158fcdcb36f7f12d5987c73661066",
               ".github/workflows/preflight-recovery.yml":"06008a439355c8be6d657a92c244e03ba27afdaa",
           }
           paths=[*expected,".github/workflows/preflight-recovery-2.yml"]

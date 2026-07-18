@@ -361,9 +361,9 @@ def validate_report(report: object, control_sha: str, lock: Mapping[str, object]
     legacy_exact = {"workflow_id": LEGACY_WORKFLOW_ID, "workflow_path": LEGACY_WORKFLOW_PATH, "workflow_name": LEGACY_WORKFLOW_NAME, "workflow_blob": LEGACY_WORKFLOW_BLOB, "run_id": LEGACY_RUN_ID, "run_attempt": 1, "event": "workflow_dispatch", "head_sha": LEGACY_CONTROL, "status": "completed", "conclusion": "failure", "artifacts": 0, "error": "Reject: non-canonical Git path: '../common.gradle'"}
     if not isinstance(legacy, Mapping) or set(legacy) != legacy_keys or any(legacy.get(key) != value for key, value in legacy_exact.items()) or legacy.get("inventory", {}).get("total_count") != 1:
         raise Reject("legacy preflight evidence changed")
-    validate_projection(report)
+    origin_by_path = validate_projection(report)
     validate_gradle(report)
-    validate_resolver(report)
+    validate_resolver(report, origin_by_path)
     validate_negative(report)
     isolation = {"sanitized_environment": True, "candidate_workspace": "absent", "credential_channels": "absent", "runtime_cache_result_channels": "absent-from-parser", "constant_report_path": REPORT_PATH, "checkout": False, "android_gradle_execution": False, "realpath": False, "follow_symlinks": False, "fetch_gitlinks": False}
     if report.get("isolation") != isolation:
@@ -417,6 +417,312 @@ def self_test(lock: Mapping[str, object], schema: Mapping[str, object]) -> None:
             pass
         else:
             raise AssertionError("hostile tuple manifest accepted")
+
+# --- ADR-003 Amendment A: independent origin/edge oracle. ---
+AMENDMENT_SHA256 = "7088e415a1b0ee5f2c777ba27e80a30a04abec0d8c90552eaacd31489f84181c"
+AMENDMENT_TEST_SHA256 = "50e136ae0b2073110272328e22b7d5f269ae4c5ad73356feef6b45673d231ecd"
+PATH_PROOF_SHA256 = "75f354006d3a90cc9d2d3a27cc9e49dc94e7bb44c11ef5d15a8a099e9be91564"
+REJECTED_CONTROL = "44a12fa84f001f6128d20d664cfdf204d9aa03c0"
+REJECTED_TREE = "af820f08079e958e29b37889830c164cb9174c51"
+SCHEMA_BLOB = "41ebc6875851ad6259cf3799b470f792798a7a65"
+WORKFLOW_ID = 315578096
+REPAIR_PATHS = (
+    ".github/workflows/preflight-recovery-2.yml",
+    "config/recovery-2-control.lock.json",
+    "scripts/ci/recovery_preflight.py",
+    "scripts/ci/test_recovery_preflight.py",
+    "scripts/ci/validate_preflight_report.py",
+)
+_AMEND_STATIC_ROOT = re.compile(
+    r"apply\s+from\s*:\s*(?P<quote>['\"])(?P<path>[^'\"]*)(?P=quote)(?P<tail>[^\r\n]*)"
+)
+_AMEND_URI_OR_DRIVE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+_AMEND_CONTENT_LOADER = None
+
+_validate_lock_v1 = validate_lock
+
+def validate_lock(lock: object) -> Mapping[str, object]:
+    if not isinstance(lock, Mapping) or set(lock) != {
+        "schema", "authorization", "parent", "amendment", "allowed_changes",
+        "controls", "workflow", "report", "resolver", "historical", "gates",
+    }:
+        raise Reject("Amendment A lock envelope changed")
+    base = dict(lock)
+    amendment = base.pop("amendment")
+    _validate_lock_v1(base)
+    expected = {
+        "adr_amendment_sha256": AMENDMENT_SHA256,
+        "test_addendum_sha256": AMENDMENT_TEST_SHA256,
+        "path_proof_sha256": PATH_PROOF_SHA256,
+        "aggregate_parent": PARENT,
+        "rejected_control": REJECTED_CONTROL,
+        "rejected_tree": REJECTED_TREE,
+        "repair_parent": REJECTED_CONTROL,
+        "incremental_paths": list(REPAIR_PATHS),
+        "schema_blob": SCHEMA_BLOB,
+        "workflow_id": WORKFLOW_ID,
+        "zero_runs_required": True,
+    }
+    if amendment != expected:
+        raise Reject("Amendment A authorization changed")
+    if lock["controls"].get("config/recovery-preflight-report-v2.schema.json") != SCHEMA_BLOB:
+        raise Reject("Amendment A schema identity changed")
+    return lock
+
+_validate_projection_v1 = validate_projection
+
+def validate_projection(report: Mapping[str, object]) -> dict[str, dict[str, str]]:
+    _validate_projection_v1(report)
+    origin_by_path: dict[str, dict[str, str]] = {}
+    for mapping in report["projection"]["origin_projection"]:
+        origin = tuple_row(mapping["origin"])
+        if origin["path"] in origin_by_path:
+            raise Reject("independent origin projection duplicate")
+        origin_by_path[origin["path"]] = origin
+    if len(origin_by_path) != 2028 or sum(row["type"] == "tree" for row in origin_by_path.values()) != 745:
+        raise Reject("independent origin projection cardinality changed")
+    if rows_digest(list(origin_by_path.values())) != UP_DIGEST:
+        raise Reject("independent origin projection digest changed")
+    return origin_by_path
+
+def _amend_git_blob(data: bytes) -> str:
+    return hashlib.sha1(f"blob {len(data)}\0".encode() + data).hexdigest()
+
+def _amend_regular(origin_by_path: Mapping[str, Mapping[str, str]], path: str, role: str) -> dict[str, str]:
+    clean_path(path)
+    row = origin_by_path.get(path)
+    if row is None:
+        folded = unicodedata.normalize("NFC", path).casefold()
+        if any(unicodedata.normalize("NFC", value).casefold() == folded for value in origin_by_path):
+            raise Reject(f"{role} case/NFC mismatch")
+        raise Reject(f"{role} missing from independent origin")
+    observed = tuple_row(row, True)
+    if observed["path"] != path:
+        raise Reject(f"{role} path changed")
+    return observed
+
+def _amend_resolve(
+    declaring_path: str,
+    literal: str,
+    origin_by_path: Mapping[str, Mapping[str, str]],
+    depth: int,
+) -> dict[str, object]:
+    declaring = _amend_regular(origin_by_path, declaring_path, "declaring")
+    if type(literal) is not str or not literal:
+        raise Reject("resolver literal is empty")
+    if unicodedata.normalize("NFC", literal) != literal:
+        raise Reject("resolver literal is non-NFC")
+    if "\0" in literal or "\\" in literal:
+        raise Reject("resolver literal contains NUL/backslash")
+    if literal.startswith(("/", "//")) or _AMEND_URI_OR_DRIVE.match(literal):
+        raise Reject("resolver literal is absolute/URI/drive")
+    if "$" in literal or any(mark in literal for mark in ("?", "#", "'", '"')):
+        raise Reject("resolver literal is dynamic/ambiguous")
+    components = literal.split("/")
+    if any(component in {"", "."} for component in components):
+        raise Reject("resolver literal contains empty/dot component")
+    base = declaring_path.split("/")[:-1]
+    for component in components:
+        if component == "..":
+            if not base:
+                raise Reject("resolver literal escapes root")
+            base.pop()
+        else:
+            if unicodedata.normalize("NFC", component) != component:
+                raise Reject("resolver component is non-NFC")
+            base.append(component)
+    if not base:
+        raise Reject("resolver target is empty")
+    normalized = "/".join(base)
+    target = _amend_regular(origin_by_path, normalized, "target")
+    if type(depth) is not int or not 1 <= depth <= 32:
+        raise Reject("resolver depth outside bound")
+    return {
+        "declaring": declaring,
+        "literal": literal,
+        "normalized_target": normalized,
+        "target": target,
+        "depth": depth,
+    }
+
+def _amend_public_loader(origin_by_path: Mapping[str, Mapping[str, str]]):
+    import urllib.request
+    def load(path: str) -> bytes:
+        row = _amend_regular(origin_by_path, path, "loaded target")
+        url = f"https://raw.githubusercontent.com/AntennaPod/AntennaPod/{UP_COMMIT}/{path}"
+        request = urllib.request.Request(url, headers={"User-Agent": "podcast-clips-amendment-a-validator/1"})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            data = response.read(4 * 1024 * 1024 + 1)
+        if not data or len(data) > 4 * 1024 * 1024 or _amend_git_blob(data) != row["identity"]:
+            raise Reject(f"independent declaring bytes changed: {path}")
+        return data
+    return load
+
+def _amend_expected_graph(
+    roots: list[str],
+    origin_by_path: Mapping[str, Mapping[str, str]],
+    loader,
+) -> tuple[list[dict[str, object]], int]:
+    cache: dict[str, bytes] = {}
+    completed: set[str] = set()
+    active: list[str] = []
+    expected: list[dict[str, object]] = []
+    max_depth = 0
+
+    def load(path: str) -> bytes:
+        if path not in cache:
+            data = loader(path)
+            if type(data) is not bytes:
+                raise Reject("independent loader returned non-bytes")
+            row = _amend_regular(origin_by_path, path, "loaded target")
+            if _amend_git_blob(data) != row["identity"]:
+                raise Reject(f"independent bytes/tuple mismatch: {path}")
+            cache[path] = data
+        return cache[path]
+
+    def visit(path: str, depth: int) -> None:
+        nonlocal max_depth
+        _amend_regular(origin_by_path, path, "declaring")
+        if depth > 32:
+            raise Reject("independent depth exceeds 32")
+        if path in active:
+            start = active.index(path)
+            raise Reject("independent cycle: " + " -> ".join(active[start:] + [path]))
+        if path in completed:
+            return
+        active.append(path)
+        max_depth = max(max_depth, depth)
+        data = load(path)
+        if path.endswith((".jar", ".toml", ".properties")):
+            active.pop()
+            completed.add(path)
+            return
+        try:
+            text = data.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            raise Reject(f"independent declaring bytes are not UTF-8: {path}") from None
+        for match in _AMEND_STATIC_ROOT.finditer(text):
+            tail = match.group("tail").strip()
+            if tail and not tail.startswith("//"):
+                raise Reject(f"independent include has trailing expression: {path}")
+            next_depth = depth + 1
+            if next_depth > 32:
+                raise Reject("independent depth exceeds 32")
+            edge = _amend_resolve(path, match.group("path"), origin_by_path, next_depth)
+            expected.append(edge)
+            target = edge["normalized_target"]
+            if target in active:
+                start = active.index(target)
+                raise Reject("independent cycle: " + " -> ".join(active[start:] + [target]))
+            if target not in completed:
+                visit(target, next_depth)
+        active.pop()
+        completed.add(path)
+
+    for root in sorted(roots):
+        visit(root, 0)
+    return expected, max_depth
+
+def validate_resolver(
+    report: Mapping[str, object],
+    origin_by_path: Mapping[str, Mapping[str, str]],
+) -> None:
+    resolver = report.get("resolver")
+    keys = {
+        "version", "semantics", "max_include_depth", "realpath", "follow_symlinks",
+        "fetch_gitlinks", "edges", "max_observed_depth", "cycles", "unresolved",
+    }
+    exact = {
+        "version": 2, "semantics": "declaring-relative-posix-lexical",
+        "max_include_depth": 32, "realpath": False,
+        "follow_symlinks": False, "fetch_gitlinks": False,
+    }
+    if not isinstance(resolver, Mapping) or set(resolver) != keys:
+        raise Reject("resolver contract changed")
+    if any(resolver.get(key) != value for key, value in exact.items()):
+        raise Reject("resolver constants changed")
+    if resolver.get("cycles") != [] or resolver.get("unresolved") != []:
+        raise Reject("resolver cycle/unresolved result changed")
+    actual = resolver.get("edges")
+    if not isinstance(actual, list):
+        raise Reject("resolver edge list missing")
+    normalized_actual = []
+    for ordinal, edge in enumerate(actual, 1):
+        if not isinstance(edge, Mapping) or set(edge) != {
+            "declaring", "literal", "normalized_target", "target", "depth",
+        }:
+            raise Reject("resolver edge schema changed")
+        declaring = tuple_row(edge["declaring"], True)
+        target = tuple_row(edge["target"], True)
+        if _amend_regular(origin_by_path, declaring["path"], "declaring") != declaring:
+            raise Reject(f"resolver declaring tuple mismatch at ordinal {ordinal}")
+        if _amend_regular(origin_by_path, target["path"], "target") != target:
+            raise Reject(f"resolver target tuple mismatch at ordinal {ordinal}")
+        recomputed = _amend_resolve(declaring["path"], edge.get("literal"), origin_by_path, edge.get("depth"))
+        if dict(edge) != recomputed:
+            raise Reject(f"resolver lexical/tuple mismatch at ordinal {ordinal}")
+        normalized_actual.append(recomputed)
+    inventory = report["gradle_inputs"]["known_inventory"]
+    roots = sorted({path for paths in inventory.values() for path in paths})
+    loader = _AMEND_CONTENT_LOADER or _amend_public_loader(origin_by_path)
+    expected, max_depth = _amend_expected_graph(roots, origin_by_path, loader)
+    if normalized_actual != expected:
+        raise Reject("resolver edges missing/duplicate/extra/reordered")
+    if resolver.get("max_observed_depth") != max_depth:
+        raise Reject("resolver maximum depth changed")
+
+def _amend_expect_reject(callable_value) -> None:
+    try:
+        callable_value()
+    except Reject:
+        return
+    raise AssertionError("Amendment A mutation was accepted")
+
+def _amend_oracle_self_test() -> None:
+    contents = {
+        "a.gradle": b'apply from: "b.gradle"\napply from: "c.gradle"\n',
+        "b.gradle": b"// leaf\n",
+        "c.gradle": b"// leaf\n",
+    }
+    origin = {
+        path: {"path": path, "type": "blob", "mode": "100644", "identity": _amend_git_blob(data)}
+        for path, data in contents.items()
+    }
+    loader = lambda path: contents[path]
+    expected, depth = _amend_expected_graph(["a.gradle"], origin, loader)
+    if len(expected) != 2 or depth != 1:
+        raise AssertionError("Amendment A oracle baseline changed")
+    mutations = []
+    for field, value in (("identity", "9" * 40), ("mode", "100755"), ("type", "tree")):
+        attacked = [dict(row) for row in expected]
+        attacked[0] = dict(attacked[0])
+        attacked[0]["target"] = dict(attacked[0]["target"])
+        attacked[0]["target"][field] = value
+        mutations.append(attacked)
+    attacked = [dict(row) for row in expected]
+    attacked[0]["declaring"] = dict(attacked[0]["declaring"])
+    attacked[0]["declaring"]["identity"] = "8" * 40
+    mutations.append(attacked)
+    mutations.extend((expected[:1], expected + [expected[0]], [expected[1], expected[0]]))
+    for attacked in mutations:
+        def check(attacked=attacked):
+            if attacked != expected:
+                raise Reject("oracle mutation")
+        _amend_expect_reject(check)
+    for path in ("B.gradle", "Gra\u0301dle.gradle", "missing.gradle"):
+        _amend_expect_reject(lambda path=path: _amend_regular(origin, path, "target"))
+    try:
+        _amend_expect_reject(lambda: None)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("always-pass validator canary survived")
+
+_self_test_v1 = self_test
+
+def self_test(lock: Mapping[str, object], schema: Mapping[str, object]) -> None:
+    _self_test_v1(lock, schema)
+    _amend_oracle_self_test()
 
 def main() -> None:
     parser = argparse.ArgumentParser()

@@ -8,19 +8,51 @@
   },
   "parent": "c43ddf3409ea0ea793982f07926ce1e1a6925c82",
   "allowed_changes": [
-    {"path": ".github/workflows/preflight-recovery-2.yml", "operation": "add", "category": "one-shot-workflow"},
-    {"path": "UPSTREAM.md", "operation": "modify", "category": "report-metadata"},
-    {"path": "config/recovery-2-control.lock.json", "operation": "add", "category": "lock"},
-    {"path": "config/recovery-preflight-report-v2.schema.json", "operation": "add", "category": "schema"},
-    {"path": "docs/base-selection-report.md", "operation": "modify", "category": "report-metadata"},
-    {"path": "scripts/ci/recovery_preflight.py", "operation": "modify", "category": "resolver-report"},
-    {"path": "scripts/ci/test_recovery_preflight.py", "operation": "modify", "category": "focused-tests"},
-    {"path": "scripts/ci/validate_preflight_report.py", "operation": "modify", "category": "schema-validator"}
+    {
+      "path": ".github/workflows/preflight-recovery-2.yml",
+      "operation": "add",
+      "category": "one-shot-workflow"
+    },
+    {
+      "path": "UPSTREAM.md",
+      "operation": "modify",
+      "category": "report-metadata"
+    },
+    {
+      "path": "config/recovery-2-control.lock.json",
+      "operation": "add",
+      "category": "lock"
+    },
+    {
+      "path": "config/recovery-preflight-report-v2.schema.json",
+      "operation": "add",
+      "category": "schema"
+    },
+    {
+      "path": "docs/base-selection-report.md",
+      "operation": "modify",
+      "category": "report-metadata"
+    },
+    {
+      "path": "scripts/ci/recovery_preflight.py",
+      "operation": "modify",
+      "category": "resolver-report"
+    },
+    {
+      "path": "scripts/ci/test_recovery_preflight.py",
+      "operation": "modify",
+      "category": "focused-tests"
+    },
+    {
+      "path": "scripts/ci/validate_preflight_report.py",
+      "operation": "modify",
+      "category": "schema-validator"
+    }
   ],
   "controls": {
-    "scripts/ci/recovery_preflight.py": "ddb06661926bdd4b1242495bd745a9fac1023330",
-    "scripts/ci/test_recovery_preflight.py": "cb133590469f1667013bea74730caa7f07fbcd29",
-    "scripts/ci/validate_preflight_report.py": "3fab41a0ade50f8b88af79081740378743c0c1d4",
+    "scripts/ci/recovery_preflight.py": "519b024c519db1d62460413086a7754f78d941c4",
+    "scripts/ci/test_recovery_preflight.py": "ccfcaef253d56e30e69b0107818fc8587aeed1ea",
+    "scripts/ci/validate_preflight_report.py": "0c22f6dcba6182d7aa04f25955861de8a02eadb8",
     "config/recovery-preflight-report-v2.schema.json": "41ebc6875851ad6259cf3799b470f792798a7a65"
   },
   "workflow": {
@@ -61,5 +93,24 @@
     "critical_gap_budget": 0,
     "max_minutes": 25,
     "run2_failure_stop": true
+  },
+  "amendment": {
+    "adr_amendment_sha256": "7088e415a1b0ee5f2c777ba27e80a30a04abec0d8c90552eaacd31489f84181c",
+    "test_addendum_sha256": "50e136ae0b2073110272328e22b7d5f269ae4c5ad73356feef6b45673d231ecd",
+    "path_proof_sha256": "75f354006d3a90cc9d2d3a27cc9e49dc94e7bb44c11ef5d15a8a099e9be91564",
+    "aggregate_parent": "c43ddf3409ea0ea793982f07926ce1e1a6925c82",
+    "rejected_control": "44a12fa84f001f6128d20d664cfdf204d9aa03c0",
+    "rejected_tree": "af820f08079e958e29b37889830c164cb9174c51",
+    "repair_parent": "44a12fa84f001f6128d20d664cfdf204d9aa03c0",
+    "incremental_paths": [
+      ".github/workflows/preflight-recovery-2.yml",
+      "config/recovery-2-control.lock.json",
+      "scripts/ci/recovery_preflight.py",
+      "scripts/ci/test_recovery_preflight.py",
+      "scripts/ci/validate_preflight_report.py"
+    ],
+    "schema_blob": "41ebc6875851ad6259cf3799b470f792798a7a65",
+    "workflow_id": 315578096,
+    "zero_runs_required": true
   }
 }
