@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Podcast Clips</string>
+    <string name="clip_action">Clip</string>
+    <string name="play_action">Play</string>
+    <string name="pause_action">Pause</string>
+</resources>

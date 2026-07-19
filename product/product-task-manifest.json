@@ -1,0 +1,1 @@
+{"counting":false,"purpose":"g011-non-counting-foundation-materialization","schema_version":"product-task-manifest-v1","tasks":["assembleDebug","testDebugUnitTest","lintDebug","renderFoundationBaselines"]}

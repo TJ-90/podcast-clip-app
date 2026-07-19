@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>City Limits</title><link>https://fixture.invalid/city</link><description>Deterministic Podcast Clips fixture.</description><item><guid>episode-001</guid><title>The shape of a city after dark</title><enclosure url="https://fixture.invalid/episode.m4a" type="audio/mp4" length="64"/></item></channel></rss>

@@ -1,0 +1,479 @@
+name: Product - foundation materialization
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact lowercase SHA-A commit
+        required: true
+        type: string
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -euo pipefail {0}
+
+jobs:
+  materialize:
+    permissions: {}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact non-counting source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          clean: true
+          lfs: false
+          submodules: false
+
+      - name: Prove exact source identity
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git status --porcelain=v1)" = ""
+          test "$(sha256sum product/product-source-path-manifest.json | cut -d' ' -f1)" = "223dfebb1a00a3eaab6cabd1b85c171c27460d26ad6d6412cc01e58f53566256"
+          test "$(git rev-parse HEAD:.github/workflows/product-foundation-materialize.yml)" = "$(git hash-object .github/workflows/product-foundation-materialize.yml)"
+
+      - name: Set up exact Java
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95
+        with:
+          distribution: temurin
+          java-version: "17.0.19+10"
+          cache: none
+
+      - name: Set up exact Gradle without cache
+        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92
+        with:
+          gradle-version: "9.4.1"
+          cache-disabled: true
+          cache-read-only: true
+          add-job-summary: never
+
+      - name: Materialize reviewed toolchain and visual proposals
+        run: |
+          gradle --no-daemon wrapper --gradle-version 9.4.1 --distribution-type bin
+          test "$(sha256sum gradle/wrapper/gradle-wrapper.jar | cut -d' ' -f1)" = "55243ef57851f12b070ad14f7f5bb8302daceeebc5bce5ece5fa6edb23e1145c"
+          test "$(sed -n 's/^distributionSha256Sum=//p' gradle/wrapper/gradle-wrapper.properties)" = "2ab2958f2a1e51120c326cad6f385153bb11ee93b3c216c5fccebfdfbb7ec6cb"
+          ./gradlew --no-daemon --write-locks app:dependencies
+          test -f app/gradle.lockfile
+          printf '%s
+' '# Podcast Clips root dependency lock v1' 'empty=empty' > gradle.lockfile
+          ./gradlew --no-daemon --write-verification-metadata sha256,pgp --export-keys help
+          test -f gradle/verification-metadata.xml
+          test -f gradle/verification-keyring.keys
+          ./gradlew --no-daemon renderFoundationBaselines
+          python3 - <<'PY'
+          import hashlib, json, pathlib, subprocess
+          root = pathlib.Path(".")
+          states = [
+              "home_compact_light", "home_compact_dark",
+              "discover_compact_light", "discover_compact_dark",
+              "library_compact_light", "library_compact_dark",
+              "clips_compact_light", "clips_compact_dark",
+          ]
+          images = []
+          for state in states:
+              path = root / "app/src/test/snapshots/images/foundation" / (state + ".png")
+              data = path.read_bytes()
+              if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+                  raise SystemExit("invalid PNG " + str(path))
+              images.append({
+                  "state": state,
+                  "path": str(path),
+                  "byte_length": len(data),
+                  "sha256": hashlib.sha256(data).hexdigest(),
+                  "git_blob_id": subprocess.check_output(["git", "hash-object", str(path)], text=True).strip(),
+                  "width_px": 360,
+                  "height_px": 800,
+              })
+          baseline = {
+              "schema_version": "foundation-baseline-manifest-v1",
+              "clock": "2026-07-19T00:00:00Z",
+              "locale": "en-US",
+              "timezone": "UTC",
+              "runner": "ubuntu-24.04",
+              "design_blob": "4234af3f9f512dd98ed50089c858150d9f32153d",
+              "images": images,
+          }
+          baseline_path = root / "app/src/test/resources/foundation/foundation-baseline-manifest.json"
+          baseline_path.parent.mkdir(parents=True, exist_ok=True)
+          baseline_path.write_text(json.dumps(baseline, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+          toolchain = {
+              "schema_version": "product-toolchain-manifest-v1",
+              "runner": "ubuntu-24.04",
+              "jdk": "17.0.19+10",
+              "gradle": "9.4.1",
+              "gradle_distribution_sha256": "2ab2958f2a1e51120c326cad6f385153bb11ee93b3c216c5fccebfdfbb7ec6cb",
+              "gradle_wrapper_jar_sha256": "55243ef57851f12b070ad14f7f5bb8302daceeebc5bce5ece5fa6edb23e1145c",
+              "agp": "9.2.1",
+              "embedded_kotlin": "2.3.10",
+              "compose_plugin": "2.3.10",
+              "ksp": "2.3.9",
+              "compile_sdk": 36,
+              "target_sdk": 36,
+              "min_sdk": 26,
+              "files": {
+                  p: hashlib.sha256((root / p).read_bytes()).hexdigest()
+                  for p in [
+                      "gradle/wrapper/gradle-wrapper.jar",
+                      "gradle/verification-metadata.xml",
+                      "gradle/verification-keyring.keys",
+                      "gradle.lockfile",
+                      "app/gradle.lockfile",
+                      "app/src/test/resources/foundation/foundation-baseline-manifest.json",
+                  ]
+              },
+          }
+          (root / "product/product-toolchain-manifest.json").write_text(
+              json.dumps(toolchain, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Stage exact single-member payload files
+        run: |
+          test ! -e "$RUNNER_TEMP/g011-stage"
+          install -d -m 0700 "$RUNNER_TEMP/g011-stage"
+          cp -- gradle/wrapper/gradle-wrapper.jar "$RUNNER_TEMP/g011-stage/g011--gradle--wrapper--gradle-wrapper.jar"
+          cp -- gradle/verification-metadata.xml "$RUNNER_TEMP/g011-stage/g011--gradle--verification-metadata.xml"
+          cp -- gradle/verification-keyring.keys "$RUNNER_TEMP/g011-stage/g011--gradle--verification-keyring.keys"
+          cp -- gradle.lockfile "$RUNNER_TEMP/g011-stage/g011--gradle.lockfile"
+          cp -- app/gradle.lockfile "$RUNNER_TEMP/g011-stage/g011--app--gradle.lockfile"
+          cp -- product/product-toolchain-manifest.json "$RUNNER_TEMP/g011-stage/g011--product--product-toolchain-manifest.json"
+          cp -- app/src/test/resources/foundation/foundation-baseline-manifest.json "$RUNNER_TEMP/g011-stage/g011--app--src--test--resources--foundation--foundation-baseline-manifest.json"
+          cp -- app/src/test/snapshots/images/foundation/home_compact_light.png "$RUNNER_TEMP/g011-stage/g011--app--src--test--snapshots--images--foundation--home_compact_light.png"
+          cp -- app/src/test/snapshots/images/foundation/home_compact_dark.png "$RUNNER_TEMP/g011-stage/g011--app--src--test--snapshots--images--foundation--home_compact_dark.png"
+          cp -- app/src/test/snapshots/images/foundation/discover_compact_light.png "$RUNNER_TEMP/g011-stage/g011--app--src--test--snapshots--images--foundation--discover_compact_light.png"
+          cp -- app/src/test/snapshots/images/foundation/discover_compact_dark.png "$RUNNER_TEMP/g011-stage/g011--app--src--test--snapshots--images--foundation--discover_compact_dark.png"
+          cp -- app/src/test/snapshots/images/foundation/library_compact_light.png "$RUNNER_TEMP/g011-stage/g011--app--src--test--snapshots--images--foundation--library_compact_light.png"
+          cp -- app/src/test/snapshots/images/foundation/library_compact_dark.png "$RUNNER_TEMP/g011-stage/g011--app--src--test--snapshots--images--foundation--library_compact_dark.png"
+          cp -- app/src/test/snapshots/images/foundation/clips_compact_light.png "$RUNNER_TEMP/g011-stage/g011--app--src--test--snapshots--images--foundation--clips_compact_light.png"
+          cp -- app/src/test/snapshots/images/foundation/clips_compact_dark.png "$RUNNER_TEMP/g011-stage/g011--app--src--test--snapshots--images--foundation--clips_compact_dark.png"
+          cmp -- gradle/wrapper/gradle-wrapper.jar "$RUNNER_TEMP/g011-stage/g011--gradle--wrapper--gradle-wrapper.jar"
+          cmp -- gradle/verification-metadata.xml "$RUNNER_TEMP/g011-stage/g011--gradle--verification-metadata.xml"
+          cmp -- gradle/verification-keyring.keys "$RUNNER_TEMP/g011-stage/g011--gradle--verification-keyring.keys"
+          cmp -- gradle.lockfile "$RUNNER_TEMP/g011-stage/g011--gradle.lockfile"
+          cmp -- app/gradle.lockfile "$RUNNER_TEMP/g011-stage/g011--app--gradle.lockfile"
+          cmp -- product/product-toolchain-manifest.json "$RUNNER_TEMP/g011-stage/g011--product--product-toolchain-manifest.json"
+          cmp -- app/src/test/resources/foundation/foundation-baseline-manifest.json "$RUNNER_TEMP/g011-stage/g011--app--src--test--resources--foundation--foundation-baseline-manifest.json"
+          cmp -- app/src/test/snapshots/images/foundation/home_compact_light.png "$RUNNER_TEMP/g011-stage/g011--app--src--test--snapshots--images--foundation--home_compact_light.png"
+          cmp -- app/src/test/snapshots/images/foundation/home_compact_dark.png "$RUNNER_TEMP/g011-stage/g011--app--src--test--snapshots--images--foundation--home_compact_dark.png"
+          cmp -- app/src/test/snapshots/images/foundation/discover_compact_light.png "$RUNNER_TEMP/g011-stage/g011--app--src--test--snapshots--images--foundation--discover_compact_light.png"
+          cmp -- app/src/test/snapshots/images/foundation/discover_compact_dark.png "$RUNNER_TEMP/g011-stage/g011--app--src--test--snapshots--images--foundation--discover_compact_dark.png"
+          cmp -- app/src/test/snapshots/images/foundation/library_compact_light.png "$RUNNER_TEMP/g011-stage/g011--app--src--test--snapshots--images--foundation--library_compact_light.png"
+          cmp -- app/src/test/snapshots/images/foundation/library_compact_dark.png "$RUNNER_TEMP/g011-stage/g011--app--src--test--snapshots--images--foundation--library_compact_dark.png"
+          cmp -- app/src/test/snapshots/images/foundation/clips_compact_light.png "$RUNNER_TEMP/g011-stage/g011--app--src--test--snapshots--images--foundation--clips_compact_light.png"
+          cmp -- app/src/test/snapshots/images/foundation/clips_compact_dark.png "$RUNNER_TEMP/g011-stage/g011--app--src--test--snapshots--images--foundation--clips_compact_dark.png"
+
+      - name: Upload wrapper jar
+        id: upload_wrapper
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: g011--gradle--wrapper--gradle-wrapper.jar
+          path: ${{ runner.temp }}/g011-stage/g011--gradle--wrapper--gradle-wrapper.jar
+          compression-level: 0
+          include-hidden-files: false
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload verification metadata
+        id: upload_verification
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: g011--gradle--verification-metadata.xml
+          path: ${{ runner.temp }}/g011-stage/g011--gradle--verification-metadata.xml
+          compression-level: 0
+          include-hidden-files: false
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload verification keyring
+        id: upload_keyring
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: g011--gradle--verification-keyring.keys
+          path: ${{ runner.temp }}/g011-stage/g011--gradle--verification-keyring.keys
+          compression-level: 0
+          include-hidden-files: false
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload root lock
+        id: upload_root_lock
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: g011--gradle.lockfile
+          path: ${{ runner.temp }}/g011-stage/g011--gradle.lockfile
+          compression-level: 0
+          include-hidden-files: false
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload app lock
+        id: upload_app_lock
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: g011--app--gradle.lockfile
+          path: ${{ runner.temp }}/g011-stage/g011--app--gradle.lockfile
+          compression-level: 0
+          include-hidden-files: false
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload toolchain manifest
+        id: upload_toolchain
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: g011--product--product-toolchain-manifest.json
+          path: ${{ runner.temp }}/g011-stage/g011--product--product-toolchain-manifest.json
+          compression-level: 0
+          include-hidden-files: false
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload baseline manifest
+        id: upload_baseline
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: g011--app--src--test--resources--foundation--foundation-baseline-manifest.json
+          path: ${{ runner.temp }}/g011-stage/g011--app--src--test--resources--foundation--foundation-baseline-manifest.json
+          compression-level: 0
+          include-hidden-files: false
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload home light
+        id: upload_home_light
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: g011--app--src--test--snapshots--images--foundation--home_compact_light.png
+          path: ${{ runner.temp }}/g011-stage/g011--app--src--test--snapshots--images--foundation--home_compact_light.png
+          compression-level: 0
+          include-hidden-files: false
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload home dark
+        id: upload_home_dark
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: g011--app--src--test--snapshots--images--foundation--home_compact_dark.png
+          path: ${{ runner.temp }}/g011-stage/g011--app--src--test--snapshots--images--foundation--home_compact_dark.png
+          compression-level: 0
+          include-hidden-files: false
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload discover light
+        id: upload_discover_light
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: g011--app--src--test--snapshots--images--foundation--discover_compact_light.png
+          path: ${{ runner.temp }}/g011-stage/g011--app--src--test--snapshots--images--foundation--discover_compact_light.png
+          compression-level: 0
+          include-hidden-files: false
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload discover dark
+        id: upload_discover_dark
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: g011--app--src--test--snapshots--images--foundation--discover_compact_dark.png
+          path: ${{ runner.temp }}/g011-stage/g011--app--src--test--snapshots--images--foundation--discover_compact_dark.png
+          compression-level: 0
+          include-hidden-files: false
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload library light
+        id: upload_library_light
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: g011--app--src--test--snapshots--images--foundation--library_compact_light.png
+          path: ${{ runner.temp }}/g011-stage/g011--app--src--test--snapshots--images--foundation--library_compact_light.png
+          compression-level: 0
+          include-hidden-files: false
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload library dark
+        id: upload_library_dark
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: g011--app--src--test--snapshots--images--foundation--library_compact_dark.png
+          path: ${{ runner.temp }}/g011-stage/g011--app--src--test--snapshots--images--foundation--library_compact_dark.png
+          compression-level: 0
+          include-hidden-files: false
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload clips light
+        id: upload_clips_light
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: g011--app--src--test--snapshots--images--foundation--clips_compact_light.png
+          path: ${{ runner.temp }}/g011-stage/g011--app--src--test--snapshots--images--foundation--clips_compact_light.png
+          compression-level: 0
+          include-hidden-files: false
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload clips dark
+        id: upload_clips_dark
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: g011--app--src--test--snapshots--images--foundation--clips_compact_dark.png
+          path: ${{ runner.temp }}/g011-stage/g011--app--src--test--snapshots--images--foundation--clips_compact_dark.png
+          compression-level: 0
+          include-hidden-files: false
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Build closed transport manifest
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RUN_ID: ${{ github.run_id }}
+          ACTOR: ${{ github.actor }}
+          ACTOR_ID: ${{ github.actor_id }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          TRIGGERING_ACTOR_ID: ${{ github.triggering_actor_id }}
+          WRAPPER_ID: ${{ steps.upload_wrapper.outputs.artifact-id }}
+          WRAPPER_DIGEST: ${{ steps.upload_wrapper.outputs.artifact-digest }}
+          VERIFICATION_ID: ${{ steps.upload_verification.outputs.artifact-id }}
+          VERIFICATION_DIGEST: ${{ steps.upload_verification.outputs.artifact-digest }}
+          KEYRING_ID: ${{ steps.upload_keyring.outputs.artifact-id }}
+          KEYRING_DIGEST: ${{ steps.upload_keyring.outputs.artifact-digest }}
+          ROOT_LOCK_ID: ${{ steps.upload_root_lock.outputs.artifact-id }}
+          ROOT_LOCK_DIGEST: ${{ steps.upload_root_lock.outputs.artifact-digest }}
+          APP_LOCK_ID: ${{ steps.upload_app_lock.outputs.artifact-id }}
+          APP_LOCK_DIGEST: ${{ steps.upload_app_lock.outputs.artifact-digest }}
+          TOOLCHAIN_ID: ${{ steps.upload_toolchain.outputs.artifact-id }}
+          TOOLCHAIN_DIGEST: ${{ steps.upload_toolchain.outputs.artifact-digest }}
+          BASELINE_ID: ${{ steps.upload_baseline.outputs.artifact-id }}
+          BASELINE_DIGEST: ${{ steps.upload_baseline.outputs.artifact-digest }}
+          HOME_LIGHT_ID: ${{ steps.upload_home_light.outputs.artifact-id }}
+          HOME_LIGHT_DIGEST: ${{ steps.upload_home_light.outputs.artifact-digest }}
+          HOME_DARK_ID: ${{ steps.upload_home_dark.outputs.artifact-id }}
+          HOME_DARK_DIGEST: ${{ steps.upload_home_dark.outputs.artifact-digest }}
+          DISCOVER_LIGHT_ID: ${{ steps.upload_discover_light.outputs.artifact-id }}
+          DISCOVER_LIGHT_DIGEST: ${{ steps.upload_discover_light.outputs.artifact-digest }}
+          DISCOVER_DARK_ID: ${{ steps.upload_discover_dark.outputs.artifact-id }}
+          DISCOVER_DARK_DIGEST: ${{ steps.upload_discover_dark.outputs.artifact-digest }}
+          LIBRARY_LIGHT_ID: ${{ steps.upload_library_light.outputs.artifact-id }}
+          LIBRARY_LIGHT_DIGEST: ${{ steps.upload_library_light.outputs.artifact-digest }}
+          LIBRARY_DARK_ID: ${{ steps.upload_library_dark.outputs.artifact-id }}
+          LIBRARY_DARK_DIGEST: ${{ steps.upload_library_dark.outputs.artifact-digest }}
+          CLIPS_LIGHT_ID: ${{ steps.upload_clips_light.outputs.artifact-id }}
+          CLIPS_LIGHT_DIGEST: ${{ steps.upload_clips_light.outputs.artifact-digest }}
+          CLIPS_DARK_ID: ${{ steps.upload_clips_dark.outputs.artifact-id }}
+          CLIPS_DARK_DIGEST: ${{ steps.upload_clips_dark.outputs.artifact-digest }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          root = pathlib.Path(".")
+          stage = pathlib.Path(os.environ["RUNNER_TEMP"]) / "g011-stage"
+          specs = [
+              ("gradle/wrapper/gradle-wrapper.jar","g011--gradle--wrapper--gradle-wrapper.jar","application/java-archive","WRAPPER_ID","WRAPPER_DIGEST","upload_wrapper"),
+              ("gradle/verification-metadata.xml","g011--gradle--verification-metadata.xml","application/xml","VERIFICATION_ID","VERIFICATION_DIGEST","upload_verification"),
+              ("gradle/verification-keyring.keys","g011--gradle--verification-keyring.keys","application/octet-stream","KEYRING_ID","KEYRING_DIGEST","upload_keyring"),
+              ("gradle.lockfile","g011--gradle.lockfile","text/plain","ROOT_LOCK_ID","ROOT_LOCK_DIGEST","upload_root_lock"),
+              ("app/gradle.lockfile","g011--app--gradle.lockfile","text/plain","APP_LOCK_ID","APP_LOCK_DIGEST","upload_app_lock"),
+              ("product/product-toolchain-manifest.json","g011--product--product-toolchain-manifest.json","application/json","TOOLCHAIN_ID","TOOLCHAIN_DIGEST","upload_toolchain"),
+              ("app/src/test/resources/foundation/foundation-baseline-manifest.json","g011--app--src--test--resources--foundation--foundation-baseline-manifest.json","application/json","BASELINE_ID","BASELINE_DIGEST","upload_baseline"),
+              ("app/src/test/snapshots/images/foundation/home_compact_light.png","g011--app--src--test--snapshots--images--foundation--home_compact_light.png","image/png","HOME_LIGHT_ID","HOME_LIGHT_DIGEST","upload_home_light"),
+              ("app/src/test/snapshots/images/foundation/home_compact_dark.png","g011--app--src--test--snapshots--images--foundation--home_compact_dark.png","image/png","HOME_DARK_ID","HOME_DARK_DIGEST","upload_home_dark"),
+              ("app/src/test/snapshots/images/foundation/discover_compact_light.png","g011--app--src--test--snapshots--images--foundation--discover_compact_light.png","image/png","DISCOVER_LIGHT_ID","DISCOVER_LIGHT_DIGEST","upload_discover_light"),
+              ("app/src/test/snapshots/images/foundation/discover_compact_dark.png","g011--app--src--test--snapshots--images--foundation--discover_compact_dark.png","image/png","DISCOVER_DARK_ID","DISCOVER_DARK_DIGEST","upload_discover_dark"),
+              ("app/src/test/snapshots/images/foundation/library_compact_light.png","g011--app--src--test--snapshots--images--foundation--library_compact_light.png","image/png","LIBRARY_LIGHT_ID","LIBRARY_LIGHT_DIGEST","upload_library_light"),
+              ("app/src/test/snapshots/images/foundation/library_compact_dark.png","g011--app--src--test--snapshots--images--foundation--library_compact_dark.png","image/png","LIBRARY_DARK_ID","LIBRARY_DARK_DIGEST","upload_library_dark"),
+              ("app/src/test/snapshots/images/foundation/clips_compact_light.png","g011--app--src--test--snapshots--images--foundation--clips_compact_light.png","image/png","CLIPS_LIGHT_ID","CLIPS_LIGHT_DIGEST","upload_clips_light"),
+              ("app/src/test/snapshots/images/foundation/clips_compact_dark.png","g011--app--src--test--snapshots--images--foundation--clips_compact_dark.png","image/png","CLIPS_DARK_ID","CLIPS_DARK_DIGEST","upload_clips_dark"),
+          ]
+          payloads = []
+          aggregate = hashlib.sha256()
+          total = 0
+          for path, name, media, id_env, digest_env, step in specs:
+              data = (root / path).read_bytes()
+              staged = (stage / name).read_bytes()
+              if data != staged:
+                  raise SystemExit("staging mismatch " + path)
+              item = {
+                  "path": path,
+                  "artifact_name": name,
+                  "archive_member_name": name,
+                  "artifact_id": int(os.environ[id_env]),
+                  "artifact_digest": os.environ[digest_env],
+                  "media_type": media,
+                  "member_byte_length": len(data),
+                  "member_sha256": hashlib.sha256(data).hexdigest(),
+                  "git_blob_id": subprocess.check_output(["git","hash-object",path], text=True).strip(),
+                  "producer_step": step,
+              }
+              payloads.append(item)
+              canonical = json.dumps(item, sort_keys=True, separators=(",", ":")).encode()
+              aggregate.update(len(canonical).to_bytes(8, "big"))
+              aggregate.update(canonical)
+              total += len(data)
+          payloads.sort(key=lambda x: x["path"])
+          manifest = {
+              "schema_version": "g011-materialization-manifest-v1",
+              "repository": "TJ-90/podcast-clip-app",
+              "run_id": int(os.environ["RUN_ID"]),
+              "run_attempt": 1,
+              "actor_login": os.environ["ACTOR"],
+              "actor_id": int(os.environ["ACTOR_ID"]),
+              "triggering_actor_login": os.environ["TRIGGERING_ACTOR"],
+              "triggering_actor_id": int(os.environ["TRIGGERING_ACTOR_ID"]),
+              "workflow_path": ".github/workflows/product-foundation-materialize.yml",
+              "workflow_blob": subprocess.check_output(["git","rev-parse","HEAD:.github/workflows/product-foundation-materialize.yml"], text=True).strip(),
+              "sha_a": os.environ["SOURCE_SHA"],
+              "tree": subprocess.check_output(["git","rev-parse","HEAD^{tree}"], text=True).strip(),
+              "source_manifest_sha256": "223dfebb1a00a3eaab6cabd1b85c171c27460d26ad6d6412cc01e58f53566256",
+              "runner_image": "ubuntu-24.04",
+              "created_at": "2026-07-19T00:00:00Z",
+              "actions": {
+                  "checkout": "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
+                  "setup_java": "03ad4de0992f5dab5e18fcb136590ce7c4a0ac95",
+                  "setup_gradle": "3f131e8634966bd73d06cc69884922b02e6faf92",
+                  "upload_artifact": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+              },
+              "execution_tools": {
+                  "jdk": "17.0.19+10", "gradle": "9.4.1", "agp": "9.2.1",
+                  "embedded_kotlin": "2.3.10", "compose_plugin": "2.3.10", "ksp": "2.3.9"
+              },
+              "payloads": payloads,
+              "payload_member_total": total,
+              "payload_tuple_sha256": aggregate.hexdigest(),
+              "counting": False,
+              "authorized": False,
+              "classification": "NON_COUNTING_MATERIALIZATION_ONLY",
+          }
+          out = stage / "g011--materialization-manifest.json"
+          out.write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+          if out.stat().st_size > 262144:
+              raise SystemExit("manifest exceeds bound")
+          PY
+
+      - name: Upload closed materialization manifest
+        id: upload_manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: g011--materialization-manifest.json
+          path: ${{ runner.temp }}/g011-stage/g011--materialization-manifest.json
+          compression-level: 0
+          include-hidden-files: false
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Remove staging material
+        if: ${{ always() }}
+        run: rm -rf -- "$RUNNER_TEMP/g011-stage"
