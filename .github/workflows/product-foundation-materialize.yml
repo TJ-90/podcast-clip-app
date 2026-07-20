@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       source_sha:
-        description: Immutable SHA-C source commit
+        description: Immutable SHA-D source commit
         required: true
         type: string
       issuing_claim_sha256:
@@ -37,7 +37,7 @@ jobs:
           ISSUING_DIGEST: ${{ inputs.issuing_claim_sha256 }}
         run: |
           import base64,hashlib,json,os,pathlib,subprocess,time,urllib.error,urllib.parse,urllib.request
-          R="TJ-90/podcast-clip-app";OID=56020743;WID=316136777;WP=".github/workflows/product-foundation-materialize.yml";WN="Product - foundation materialization";BR="refs/heads/bootstrap/repo-native/g011-materialization-v2";CAP="1db11efa3612fc094018ce6af4e2153e3658ef6d";CAPT="5dadcddfd05bf10b237d07a502dd3778ef06780b";T=os.environ["GH_TOKEN"]
+          R="TJ-90/podcast-clip-app";OID=56020743;WID=316136777;WP=".github/workflows/product-foundation-materialize.yml";WN="Product - foundation materialization";BR="refs/heads/bootstrap/repo-native/g011-materialization-v3";CAP="1db11efa3612fc094018ce6af4e2153e3658ef6d";CAPT="5dadcddfd05bf10b237d07a502dd3778ef06780b";T=os.environ["GH_TOKEN"]
           def api(m,p,b=None,expect=(200,)):
            d=None if b is None else json.dumps(b,separators=(",",":"),sort_keys=True).encode();q=urllib.request.Request("https://api.github.com"+p,data=d,method=m,headers={"Accept":"application/vnd.github+json","Authorization":"Bearer "+T,"X-GitHub-Api-Version":"2026-03-10","User-Agent":"g011-self-quarantine"})
            try:
@@ -71,11 +71,11 @@ jobs:
           if any(os.environ.get(k)!=v for k,v in exact.items()):raise RuntimeError("context")
           sha=os.environ['SOURCE_SHA'];ih=os.environ['ISSUING_DIGEST'];rid=int(os.environ['GITHUB_RUN_ID'])
           if not __import__('re').fullmatch('[0-9a-f]{40}',sha) or sha!=os.environ['GITHUB_SHA'] or not __import__('re').fullmatch('[0-9a-f]{64}',ih):raise RuntimeError("input")
-          i,got=rec('evidence/repo-native/g011-dispatch-issuing-v1')
+          i,got=rec('evidence/repo-native/g011-dispatch-issuing-v2')
           if got!=ih or i.get('source_sha')!=sha or i.get('actor_id')!=OID:raise RuntimeError("issuing")
-          c,_=rec('evidence/repo-native/g011-controller-claim-v1');a=None
+          c,_=rec('evidence/repo-native/g011-controller-claim-v2');a=None
           for _ in range(31):
-           try:a,_=rec(f'evidence/repo-native/g011-run-authorization-v1/{rid}-1');break
+           try:a,_=rec(f'evidence/repo-native/g011-run-authorization-v2/{rid}-1');break
            except Exception:time.sleep(5)
           if a is None:raise RuntimeError("authorization")
           signed=a.get('signed',{});msg=json.dumps(signed,separators=(",",":"),sort_keys=True).encode();pk=base64.b64decode(c.get('public_key_base64',''),validate=True);sig=base64.b64decode(a.get('signature_base64',''),validate=True)
