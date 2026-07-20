@@ -43,6 +43,10 @@ jobs:
             if collision and e.code==422:return None
             raise RuntimeError('api') from None
           def canon(o):return json.dumps(o,separators=(',',':'),sort_keys=True).encode()
+          def r64(v):
+           d=hashlib.sha256(v).digest();x=base64.urlsafe_b64encode(d).decode().rstrip('=')
+           if len(x)!=43 or base64.urlsafe_b64decode(x+'=')!=d:raise SystemExit('reservation digest encoding')
+           return x
           def blob(b):return api('POST',f'/repos/{R}/git/blobs',{'content':base64.b64encode(b).decode(),'encoding':'base64'},(201,))['sha']
           def tree(base,path,b):return api('POST',f'/repos/{R}/git/trees',{'base_tree':base,'tree':[{'path':path,'mode':'100644','type':'blob','sha':b}]},(201,))['sha']
           def commit(msg,t,p):return api('POST',f'/repos/{R}/git/commits',{'message':msg,'tree':t,'parents':[p]},(201,))['sha']
@@ -68,7 +72,7 @@ jobs:
           if len(found)!=1 or found[0]['id']!=PR:raise RuntimeError('siblings')
           q=api('GET',f'/repos/{R}/actions/runs/{PR}/artifacts?per_page=100');arts=q.get('artifacts',[]);by={x.get('name'):x for x in arts}
           if q.get('total_count')!=16 or len(arts)!=16 or set(by)!=set(N) or any(x.get('expired') or x.get('workflow_run',{}).get('id')!=PR for x in arts):raise RuntimeError('artifacts')
-          c=hashlib.sha256(f'{RR}:{AT}:{SHA}'.encode()).hexdigest();prefix='heads/evidence/repo-native/g011-write-reservations-v2/hosted-relay/relay-contender'
+          c=r64(f'{RR}:{AT}:{SHA}'.encode());prefix='heads/evidence/repo-native/g011-write-reservations-v2/hosted-relay/relay-contender'
           try:e=api('GET',f'/repos/{R}/git/matching-refs/{prefix}')
           except Exception:e=[]
           if len(e)==0:slot='PRIMARY';res=f'evidence/repo-native/g011-write-reservations-v2/hosted-relay/relay-contender/{c}/cap-3/ord-3-11/{c}'
@@ -243,6 +247,10 @@ jobs:
             d[k]=v
            return d
           def canon(o):return json.dumps(o,separators=(',',':'),sort_keys=True).encode()
+          def r64(v):
+           d=hashlib.sha256(v).digest();x=base64.urlsafe_b64encode(d).decode().rstrip('=')
+           if len(x)!=43 or base64.urlsafe_b64decode(x+'=')!=d:raise SystemExit('reservation digest encoding')
+           return x
           def gid(b):return hashlib.sha1(b'blob '+str(len(b)).encode()+b'\0'+b).hexdigest()
           def blob(b):return api('POST',f'/repos/{R}/git/blobs',{'content':base64.b64encode(b).decode(),'encoding':'base64'},(201,))['sha']
           def tree(base,path,b):return api('POST',f'/repos/{R}/git/trees',{'base_tree':base,'tree':[{'path':path,'mode':'100644','type':'blob','sha':b}]},(201,))['sha']
@@ -258,7 +266,7 @@ jobs:
            raws[name]=b;rows.append({'artifact_id':m['id'],'artifact_name':name,'archive_byte_length':len(b),'archive_sha256':h,'download_validation_state':'VERIFIED','member_blob_id':gid(b),'member_byte_length':len(b),'member_sha256':h})
           man=json.loads(raws[N[-1]],object_pairs_hook=uniq);pl=man.get('payloads',[]);by={x.get('artifact_name'):x for x in pl}
           if man.get('schema_version')!='g011-materialization-manifest-v1' or man.get('repository')!=R or man.get('run_id')!=PR or man.get('run_attempt')!=1 or len(pl)!=15 or set(by)!=set(N[:-1]):raise RuntimeError('manifest')
-          c=hashlib.sha256(f'{RR}:{AT}:{SHA}:payloads'.encode()).hexdigest();res=f'evidence/repo-native/g011-write-reservations-v2/hosted-relay/payload-set/{c}/cap-15/ord-67-81/{c}'
+          c=r64(f'{RR}:{AT}:{SHA}:payloads'.encode());res=f'evidence/repo-native/g011-write-reservations-v2/hosted-relay/payload-set/{c}/cap-15/ord-67-81/{c}'
           if mkref(res,SHA) is None or getref(res)!=SHA:raise RuntimeError('payload reservation')
           posted=[]
           for name in N[:-1]:
@@ -267,7 +275,7 @@ jobs:
            x=blob(b)
            if x!=gid(b):raise RuntimeError('blob')
            posted.append({'artifact_name':name,'blob_id':x,'member_blob_write_state':'POSTED_PAYLOAD'})
-          rows[-1]['member_blob_write_state']='HASH_ONLY_NOT_POSTED';hc=hashlib.sha256(f'{RR}:{AT}:{SHA}:history'.encode()).hexdigest();hr=f'evidence/repo-native/g011-write-reservations-v2/hosted-relay/relay-materialization-history/{hc}/cap-3/ord-85-93/{hc}'
+          rows[-1]['member_blob_write_state']='HASH_ONLY_NOT_POSTED';hc=r64(f'{RR}:{AT}:{SHA}:history'.encode());hr=f'evidence/repo-native/g011-write-reservations-v2/hosted-relay/relay-materialization-history/{hc}/cap-3/ord-85-93/{hc}'
           if mkref(hr,CAP) is None or getref(hr)!=CAP:raise RuntimeError('history reservation')
           h={'history_version':'g011-materialization-history-v3','repository':R,'control_sha':SHA,'producer_run_id':PR,'relay_run_id':RR,'relay_run_attempt':AT,'artifacts':rows,'payload_blobs':posted,'manifest_member_blob_id':gid(raws[N[-1]]),'manifest_member_blob_write_state':'HASH_ONLY_NOT_POSTED','outcome':'HOSTED_RELAY_SUCCESS','next_operation_ordinal':112};b=blob(canon(h));t=tree(CAPT,f'evidence/repo-native/g011-materialization-history-v3/{SHA}/history.json',b);cs=commit('Bind hosted materialization transfer without exposing product bytes',t,CAP);rr=f'evidence/repo-native/g011-materialization-history-v3/{SHA}'
           if mkref(rr,cs) is None or getref(rr)!=cs:raise RuntimeError('history')
