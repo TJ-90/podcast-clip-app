@@ -4,9 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       source_sha:
-        description: Exact lowercase SHA-A commit
+        description: Immutable SHA-C source commit
         required: true
         type: string
+      issuing_claim_sha256:
+        description: Immutable issuing claim payload SHA-256
+        required: true
+        type: string
+
+concurrency:
+  group: g011-foundation-materialization-v1
+  cancel-in-progress: false
 
 permissions: {}
 
@@ -15,7 +23,74 @@ defaults:
     shell: bash --noprofile --norc -euo pipefail {0}
 
 jobs:
+  self-quarantine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Disable producer and verify the signed one-run authorization
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          ISSUING_DIGEST: ${{ inputs.issuing_claim_sha256 }}
+        run: |
+          import base64,hashlib,json,os,pathlib,subprocess,time,urllib.error,urllib.parse,urllib.request
+          R="TJ-90/podcast-clip-app";OID=56020743;WID=316136777;WP=".github/workflows/product-foundation-materialize.yml";WN="Product - foundation materialization";BR="refs/heads/bootstrap/repo-native/g011-materialization-v2";CAP="1db11efa3612fc094018ce6af4e2153e3658ef6d";CAPT="5dadcddfd05bf10b237d07a502dd3778ef06780b";T=os.environ["GH_TOKEN"]
+          def api(m,p,b=None,expect=(200,)):
+           d=None if b is None else json.dumps(b,separators=(",",":"),sort_keys=True).encode();q=urllib.request.Request("https://api.github.com"+p,data=d,method=m,headers={"Accept":"application/vnd.github+json","Authorization":"Bearer "+T,"X-GitHub-Api-Version":"2026-03-10","User-Agent":"g011-self-quarantine"})
+           try:
+            with urllib.request.urlopen(q,timeout=20) as x:
+             y=x.read(1048576)
+             if x.status not in expect:raise RuntimeError("status")
+             return json.loads(y) if y else None
+           except urllib.error.HTTPError as e:e.read(4096);raise RuntimeError("api") from None
+          def uniq(p):
+           d={}
+           for k,v in p:
+            if k in d:raise RuntimeError("duplicate")
+            d[k]=v
+           return d
+          base=None
+          def rec(r):
+           global base
+           rs=api("GET",f"/repos/{R}/git/ref/heads/{urllib.parse.quote(r,safe='/')}");c=api("GET",f"/repos/{R}/git/commits/{rs['object']['sha']}")
+           if [x['sha'] for x in c.get('parents',[])]!=[CAP]:raise RuntimeError("parent")
+           tr=api("GET",f"/repos/{R}/git/trees/{c['tree']['sha']}?recursive=1")['tree']
+           if base is None:base={(x['path'],x['mode'],x['type'],x['sha']) for x in api("GET",f"/repos/{R}/git/trees/{CAPT}?recursive=1")['tree']}
+           a=[x for x in tr if (x['path'],x['mode'],x['type'],x['sha']) not in base]
+           if len(a)!=1 or a[0]['mode']!='100644' or a[0]['type']!='blob':raise RuntimeError("delta")
+           raw=base64.b64decode(api("GET",f"/repos/{R}/git/blobs/{a[0]['sha']}")['content'],validate=True);o=json.loads(raw,object_pairs_hook=uniq)
+           if raw!=json.dumps(o,separators=(",",":"),sort_keys=True).encode():raise RuntimeError("canonical")
+           return o,hashlib.sha256(raw).hexdigest()
+          # First network mutation is the producer's own disable; all public input inspection follows readback.
+          api("PUT",f"/repos/{R}/actions/workflows/{WID}/disable",expect=(204,));disabled=int(time.time());w=api("GET",f"/repos/{R}/actions/workflows/{WID}")
+          if w.get('state')!='disabled_manually' or w.get('path')!=WP:raise RuntimeError("quarantine")
+          exact={'GITHUB_REPOSITORY':R,'GITHUB_REPOSITORY_OWNER_ID':str(OID),'GITHUB_ACTOR_ID':str(OID),'GITHUB_TRIGGERING_ACTOR_ID':str(OID),'GITHUB_EVENT_NAME':'workflow_dispatch','GITHUB_RUN_ATTEMPT':'1','GITHUB_REF':BR,'GITHUB_WORKFLOW':WN,'GITHUB_WORKFLOW_REF':f'{R}/{WP}@{BR}'}
+          if any(os.environ.get(k)!=v for k,v in exact.items()):raise RuntimeError("context")
+          sha=os.environ['SOURCE_SHA'];ih=os.environ['ISSUING_DIGEST'];rid=int(os.environ['GITHUB_RUN_ID'])
+          if not __import__('re').fullmatch('[0-9a-f]{40}',sha) or sha!=os.environ['GITHUB_SHA'] or not __import__('re').fullmatch('[0-9a-f]{64}',ih):raise RuntimeError("input")
+          i,got=rec('evidence/repo-native/g011-dispatch-issuing-v1')
+          if got!=ih or i.get('source_sha')!=sha or i.get('actor_id')!=OID:raise RuntimeError("issuing")
+          c,_=rec('evidence/repo-native/g011-controller-claim-v1');a=None
+          for _ in range(31):
+           try:a,_=rec(f'evidence/repo-native/g011-run-authorization-v1/{rid}-1');break
+           except Exception:time.sleep(5)
+          if a is None:raise RuntimeError("authorization")
+          signed=a.get('signed',{});msg=json.dumps(signed,separators=(",",":"),sort_keys=True).encode();pk=base64.b64decode(c.get('public_key_base64',''),validate=True);sig=base64.b64decode(a.get('signature_base64',''),validate=True)
+          tmp=pathlib.Path(os.environ['RUNNER_TEMP'])/'g011-auth';tmp.mkdir(mode=0o700);(tmp/'pk.der').write_bytes(bytes.fromhex('302a300506032b6570032100')+pk);(tmp/'sig').write_bytes(sig);(tmp/'msg').write_bytes(msg)
+          q=subprocess.run(['openssl','pkeyutl','-verify','-pubin','-inkey',str(tmp/'pk.der'),'-keyform','DER','-sigfile',str(tmp/'sig'),'-rawin','-in',str(tmp/'msg')],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+          if q.returncode:raise RuntimeError("signature")
+          need={'repository':R,'source_sha':sha,'workflow_id':WID,'run_id':rid,'run_attempt':1,'actor_id':OID,'triggering_actor_id':OID,'workflow_disabled_state':'disabled_manually','issuing_claim_sha256':ih,'permanent_second_run_revocation':True}
+          if any(signed.get(k)!=v for k,v in need.items()):raise RuntimeError("binding")
+          pol=signed.get('policy',{});inv=signed.get('inventories',[])
+          if pol.get('allowed_actions')!='selected' or pol.get('sha_pinning_required') is not True or pol.get('github_owned_allowed') is not False or pol.get('verified_allowed') is not False or len(pol.get('roots',[]))!=5 or len(inv)!=4 or any(x.get('run_id')!=rid or x.get('sibling_count')!=0 for x in inv):raise RuntimeError("policy/inventory")
+          if int(signed.get('expires_at_epoch',0))<int(time.time()) or int(time.time())-int(pol.get('observed_at_epoch',0))>300 or int(signed.get('disabled_at_epoch',0))<disabled-30:raise RuntimeError("freshness")
+
   materialize:
+    needs: self-quarantine
+    if: ${{ needs.self-quarantine.result == 'success' }}
     permissions: {}
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -63,7 +138,7 @@ jobs:
           ./gradlew --no-daemon --write-locks app:dependencies
           test -f app/gradle.lockfile
           printf '%s
-' '# Podcast Clips root dependency lock v1' 'empty=empty' > gradle.lockfile
+          ' '# Podcast Clips root dependency lock v1' 'empty=empty' > gradle.lockfile
           ./gradlew --no-daemon --write-verification-metadata sha256,pgp --export-keys help
           test -f gradle/verification-metadata.xml
           test -f gradle/verification-keyring.keys
@@ -177,6 +252,7 @@ jobs:
         with:
           name: g011--gradle--wrapper--gradle-wrapper.jar
           path: ${{ runner.temp }}/g011-stage/g011--gradle--wrapper--gradle-wrapper.jar
+          archive: false
           compression-level: 0
           include-hidden-files: false
           overwrite: false
@@ -188,6 +264,7 @@ jobs:
         with:
           name: g011--gradle--verification-metadata.xml
           path: ${{ runner.temp }}/g011-stage/g011--gradle--verification-metadata.xml
+          archive: false
           compression-level: 0
           include-hidden-files: false
           overwrite: false
@@ -199,6 +276,7 @@ jobs:
         with:
           name: g011--gradle--verification-keyring.keys
           path: ${{ runner.temp }}/g011-stage/g011--gradle--verification-keyring.keys
+          archive: false
           compression-level: 0
           include-hidden-files: false
           overwrite: false
@@ -210,6 +288,7 @@ jobs:
         with:
           name: g011--gradle.lockfile
           path: ${{ runner.temp }}/g011-stage/g011--gradle.lockfile
+          archive: false
           compression-level: 0
           include-hidden-files: false
           overwrite: false
@@ -221,6 +300,7 @@ jobs:
         with:
           name: g011--app--gradle.lockfile
           path: ${{ runner.temp }}/g011-stage/g011--app--gradle.lockfile
+          archive: false
           compression-level: 0
           include-hidden-files: false
           overwrite: false
@@ -232,6 +312,7 @@ jobs:
         with:
           name: g011--product--product-toolchain-manifest.json
           path: ${{ runner.temp }}/g011-stage/g011--product--product-toolchain-manifest.json
+          archive: false
           compression-level: 0
           include-hidden-files: false
           overwrite: false
@@ -243,6 +324,7 @@ jobs:
         with:
           name: g011--app--src--test--resources--foundation--foundation-baseline-manifest.json
           path: ${{ runner.temp }}/g011-stage/g011--app--src--test--resources--foundation--foundation-baseline-manifest.json
+          archive: false
           compression-level: 0
           include-hidden-files: false
           overwrite: false
@@ -254,6 +336,7 @@ jobs:
         with:
           name: g011--app--src--test--snapshots--images--foundation--home_compact_light.png
           path: ${{ runner.temp }}/g011-stage/g011--app--src--test--snapshots--images--foundation--home_compact_light.png
+          archive: false
           compression-level: 0
           include-hidden-files: false
           overwrite: false
@@ -265,6 +348,7 @@ jobs:
         with:
           name: g011--app--src--test--snapshots--images--foundation--home_compact_dark.png
           path: ${{ runner.temp }}/g011-stage/g011--app--src--test--snapshots--images--foundation--home_compact_dark.png
+          archive: false
           compression-level: 0
           include-hidden-files: false
           overwrite: false
@@ -276,6 +360,7 @@ jobs:
         with:
           name: g011--app--src--test--snapshots--images--foundation--discover_compact_light.png
           path: ${{ runner.temp }}/g011-stage/g011--app--src--test--snapshots--images--foundation--discover_compact_light.png
+          archive: false
           compression-level: 0
           include-hidden-files: false
           overwrite: false
@@ -287,6 +372,7 @@ jobs:
         with:
           name: g011--app--src--test--snapshots--images--foundation--discover_compact_dark.png
           path: ${{ runner.temp }}/g011-stage/g011--app--src--test--snapshots--images--foundation--discover_compact_dark.png
+          archive: false
           compression-level: 0
           include-hidden-files: false
           overwrite: false
@@ -298,6 +384,7 @@ jobs:
         with:
           name: g011--app--src--test--snapshots--images--foundation--library_compact_light.png
           path: ${{ runner.temp }}/g011-stage/g011--app--src--test--snapshots--images--foundation--library_compact_light.png
+          archive: false
           compression-level: 0
           include-hidden-files: false
           overwrite: false
@@ -309,6 +396,7 @@ jobs:
         with:
           name: g011--app--src--test--snapshots--images--foundation--library_compact_dark.png
           path: ${{ runner.temp }}/g011-stage/g011--app--src--test--snapshots--images--foundation--library_compact_dark.png
+          archive: false
           compression-level: 0
           include-hidden-files: false
           overwrite: false
@@ -320,6 +408,7 @@ jobs:
         with:
           name: g011--app--src--test--snapshots--images--foundation--clips_compact_light.png
           path: ${{ runner.temp }}/g011-stage/g011--app--src--test--snapshots--images--foundation--clips_compact_light.png
+          archive: false
           compression-level: 0
           include-hidden-files: false
           overwrite: false
@@ -331,6 +420,7 @@ jobs:
         with:
           name: g011--app--src--test--snapshots--images--foundation--clips_compact_dark.png
           path: ${{ runner.temp }}/g011-stage/g011--app--src--test--snapshots--images--foundation--clips_compact_dark.png
+          archive: false
           compression-level: 0
           include-hidden-files: false
           overwrite: false
@@ -468,6 +558,7 @@ jobs:
         with:
           name: g011--materialization-manifest.json
           path: ${{ runner.temp }}/g011-stage/g011--materialization-manifest.json
+          archive: false
           compression-level: 0
           include-hidden-files: false
           overwrite: false

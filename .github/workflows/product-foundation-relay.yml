@@ -1,0 +1,274 @@
+name: Product - foundation hosted relay
+
+on:
+  workflow_run:
+    workflows: [Product - foundation materialization]
+    types: [completed]
+    branches: [bootstrap/repo-native/g011-materialization-v2]
+
+concurrency:
+  group: g011-foundation-hosted-relay-v1
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: write
+      contents: write
+    steps:
+      - name: Validate producer, claims, metadata, and win the immutable relay claim
+        id: preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCER_RUN_ID: ${{ github.event.workflow_run.id }}
+          PRODUCER_SHA: ${{ github.event.workflow_run.head_sha }}
+          PRODUCER_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          NAMES: "[\"g011--gradle--wrapper--gradle-wrapper.jar\",\"g011--gradle--verification-metadata.xml\",\"g011--gradle--verification-keyring.keys\",\"g011--gradle.lockfile\",\"g011--app--gradle.lockfile\",\"g011--product--product-toolchain-manifest.json\",\"g011--app--src--test--resources--foundation--foundation-baseline-manifest.json\",\"g011--app--src--test--snapshots--images--foundation--home_compact_light.png\",\"g011--app--src--test--snapshots--images--foundation--home_compact_dark.png\",\"g011--app--src--test--snapshots--images--foundation--discover_compact_light.png\",\"g011--app--src--test--snapshots--images--foundation--discover_compact_dark.png\",\"g011--app--src--test--snapshots--images--foundation--library_compact_light.png\",\"g011--app--src--test--snapshots--images--foundation--library_compact_dark.png\",\"g011--app--src--test--snapshots--images--foundation--clips_compact_light.png\",\"g011--app--src--test--snapshots--images--foundation--clips_compact_dark.png\",\"g011--materialization-manifest.json\"]"
+        run: |
+          import base64,hashlib,json,os,urllib.error,urllib.parse,urllib.request
+          R='TJ-90/podcast-clip-app';OID=56020743;PID=316136777;PP='.github/workflows/product-foundation-materialize.yml';PN='Product - foundation materialization';CAP='1db11efa3612fc094018ce6af4e2153e3658ef6d';CAPT='5dadcddfd05bf10b237d07a502dd3778ef06780b';T=os.environ['GH_TOKEN'];PR=int(os.environ['PRODUCER_RUN_ID']);RR=int(os.environ['GITHUB_RUN_ID']);AT=int(os.environ['GITHUB_RUN_ATTEMPT']);SHA=os.environ['PRODUCER_SHA'];N=json.loads(os.environ['NAMES']);TMP=os.environ['RUNNER_TEMP']
+          def api(m,p,b=None,expect=(200,),collision=False):
+           d=None if b is None else json.dumps(b,separators=(',',':'),sort_keys=True).encode();q=urllib.request.Request('https://api.github.com'+p,data=d,method=m,headers={'Accept':'application/vnd.github+json','Authorization':'Bearer '+T,'X-GitHub-Api-Version':'2026-03-10','User-Agent':'g011-relay'})
+           try:
+            with urllib.request.urlopen(q,timeout=20) as x:
+             y=x.read(4194304)
+             if x.status not in expect:raise RuntimeError('status')
+             return json.loads(y) if y else None
+           except urllib.error.HTTPError as e:
+            e.read(4096)
+            if collision and e.code==422:return None
+            raise RuntimeError('api') from None
+          def canon(o):return json.dumps(o,separators=(',',':'),sort_keys=True).encode()
+          def blob(b):return api('POST',f'/repos/{R}/git/blobs',{'content':base64.b64encode(b).decode(),'encoding':'base64'},(201,))['sha']
+          def tree(base,path,b):return api('POST',f'/repos/{R}/git/trees',{'base_tree':base,'tree':[{'path':path,'mode':'100644','type':'blob','sha':b}]},(201,))['sha']
+          def commit(msg,t,p):return api('POST',f'/repos/{R}/git/commits',{'message':msg,'tree':t,'parents':[p]},(201,))['sha']
+          def mkref(r,s):return api('POST',f'/repos/{R}/git/refs',{'ref':'refs/heads/'+r,'sha':s},(201,),True)
+          def getref(r):return api('GET',f'/repos/{R}/git/ref/heads/{urllib.parse.quote(r,safe="/")}')['object']['sha']
+          def rec(r):
+           cs=getref(r);c=api('GET',f'/repos/{R}/git/commits/{cs}');tr=api('GET',f'/repos/{R}/git/trees/{c["tree"]["sha"]}?recursive=1')['tree'];bt={(x['path'],x['mode'],x['type'],x['sha']) for x in api('GET',f'/repos/{R}/git/trees/{CAPT}?recursive=1')['tree']};a=[x for x in tr if (x['path'],x['mode'],x['type'],x['sha']) not in bt]
+           if [x['sha'] for x in c.get('parents',[])]!=[CAP] or len(a)!=1 or a[0]['type']!='blob':raise RuntimeError('record')
+           raw=base64.b64decode(api('GET',f'/repos/{R}/git/blobs/{a[0]["sha"]}')['content']);o=json.loads(raw)
+           if raw!=canon(o):raise RuntimeError('canonical')
+           return o,hashlib.sha256(raw).hexdigest()
+          if os.environ.get('GITHUB_REPOSITORY')!=R or os.environ.get('GITHUB_REPOSITORY_OWNER_ID')!=str(OID) or AT!=1 or os.environ.get('PRODUCER_BRANCH')!='bootstrap/repo-native/g011-materialization-v2':raise RuntimeError('context')
+          r=api('GET',f'/repos/{R}/actions/runs/{PR}');w=api('GET',f'/repos/{R}/actions/workflows/{PID}')
+          if any(r.get(k)!=v for k,v in {'id':PR,'workflow_id':PID,'event':'workflow_dispatch','head_sha':SHA,'head_branch':'bootstrap/repo-native/g011-materialization-v2','run_attempt':1,'status':'completed'}.items()) or r.get('actor',{}).get('id')!=OID or r.get('triggering_actor',{}).get('id')!=OID or w.get('path')!=PP or w.get('name')!=PN or w.get('state')!='disabled_manually':raise RuntimeError('producer')
+          i,ih=rec('evidence/repo-native/g011-dispatch-issuing-v1');a,ah=rec(f'evidence/repo-native/g011-run-authorization-v1/{PR}-1')
+          if i.get('source_sha')!=SHA or a.get('signed',{}).get('run_id')!=PR or a.get('signed',{}).get('source_sha')!=SHA:raise RuntimeError('claim')
+          page=1;found=[]
+          while True:
+           q=api('GET',f'/repos/{R}/actions/workflows/{PID}/runs?per_page=100&page={page}')['workflow_runs'];found += [x for x in q if x.get('head_sha')==SHA]
+           if len(q)<100:break
+           page+=1
+           if page>100:raise RuntimeError('pages')
+          if len(found)!=1 or found[0]['id']!=PR:raise RuntimeError('siblings')
+          q=api('GET',f'/repos/{R}/actions/runs/{PR}/artifacts?per_page=100');arts=q.get('artifacts',[]);by={x.get('name'):x for x in arts}
+          if q.get('total_count')!=16 or len(arts)!=16 or set(by)!=set(N) or any(x.get('expired') or x.get('workflow_run',{}).get('id')!=PR for x in arts):raise RuntimeError('artifacts')
+          c=hashlib.sha256(f'{RR}:{AT}:{SHA}'.encode()).hexdigest();prefix='heads/evidence/repo-native/g011-write-reservations-v1/hosted-relay/relay-contender'
+          try:e=api('GET',f'/repos/{R}/git/matching-refs/{prefix}')
+          except Exception:e=[]
+          if len(e)==0:slot='PRIMARY';res=f'evidence/repo-native/g011-write-reservations-v1/hosted-relay/relay-contender/{c}/cap-3/ord-3-11/{c}'
+          elif len(e)==1:slot='SECONDARY';res=f'evidence/repo-native/g011-write-reservations-v1/hosted-relay/relay-contender/{c}/cap-3/ord-15-23/{c}'
+          else:raise RuntimeError('slots')
+          if mkref(res,CAP) is None or getref(res)!=CAP:raise RuntimeError('reservation')
+          raw=canon({'attempt':AT,'authorization_sha256':ah,'head_sha':SHA,'issuing_claim_sha256':ih,'repository':R,'relay_run_id':RR,'slot':slot,'triggering_run_id':PR});b=blob(raw);path=f'evidence/repo-native/g011-relay-run-contenders-v1/{RR}-{AT}/relay-claim.json';t=tree(CAPT,path,b);cs=commit('Reserve one hosted relay contender',t,CAP);cr=f'evidence/repo-native/g011-relay-run-contenders-v1/{RR}-{AT}'
+          if mkref(cr,cs) is None or getref(cr)!=cs:raise RuntimeError('contender')
+          w=mkref('evidence/repo-native/g011-relay-run-claim-v1',cs);win=(w is not None or getref('evidence/repo-native/g011-relay-run-claim-v1')==cs)
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('winner='+('true' if win else 'false')+'\n')
+          if not win:raise SystemExit(0)
+          meta={}
+          for n,name in enumerate(N):
+           x=api('GET',f'/repos/{R}/actions/artifacts/{by[name]["id"]}')
+           if x.get('id')!=by[name]['id'] or x.get('name')!=name or x.get('expired'):raise RuntimeError('metadata')
+           meta[name]={k:x.get(k) for k in ('id','name','size_in_bytes','digest','created_at','expires_at')}
+           with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write(f'artifact_{n:02d}_id={x["id"]}\n')
+          os.mkdir(TMP+'/g011-relay-control',0o700);open(TMP+'/g011-relay-control/metadata.json','wb').write(canon(meta))
+      - name: Download immutable artifact 01
+        if: steps.preflight.outputs.winner == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ steps.preflight.outputs.artifact_00_id }}
+          path: ${{ runner.temp }}/g011-relay/00
+          skip-decompress: true
+          digest-mismatch: error
+      - name: Download immutable artifact 02
+        if: steps.preflight.outputs.winner == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ steps.preflight.outputs.artifact_01_id }}
+          path: ${{ runner.temp }}/g011-relay/01
+          skip-decompress: true
+          digest-mismatch: error
+      - name: Download immutable artifact 03
+        if: steps.preflight.outputs.winner == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ steps.preflight.outputs.artifact_02_id }}
+          path: ${{ runner.temp }}/g011-relay/02
+          skip-decompress: true
+          digest-mismatch: error
+      - name: Download immutable artifact 04
+        if: steps.preflight.outputs.winner == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ steps.preflight.outputs.artifact_03_id }}
+          path: ${{ runner.temp }}/g011-relay/03
+          skip-decompress: true
+          digest-mismatch: error
+      - name: Download immutable artifact 05
+        if: steps.preflight.outputs.winner == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ steps.preflight.outputs.artifact_04_id }}
+          path: ${{ runner.temp }}/g011-relay/04
+          skip-decompress: true
+          digest-mismatch: error
+      - name: Download immutable artifact 06
+        if: steps.preflight.outputs.winner == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ steps.preflight.outputs.artifact_05_id }}
+          path: ${{ runner.temp }}/g011-relay/05
+          skip-decompress: true
+          digest-mismatch: error
+      - name: Download immutable artifact 07
+        if: steps.preflight.outputs.winner == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ steps.preflight.outputs.artifact_06_id }}
+          path: ${{ runner.temp }}/g011-relay/06
+          skip-decompress: true
+          digest-mismatch: error
+      - name: Download immutable artifact 08
+        if: steps.preflight.outputs.winner == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ steps.preflight.outputs.artifact_07_id }}
+          path: ${{ runner.temp }}/g011-relay/07
+          skip-decompress: true
+          digest-mismatch: error
+      - name: Download immutable artifact 09
+        if: steps.preflight.outputs.winner == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ steps.preflight.outputs.artifact_08_id }}
+          path: ${{ runner.temp }}/g011-relay/08
+          skip-decompress: true
+          digest-mismatch: error
+      - name: Download immutable artifact 10
+        if: steps.preflight.outputs.winner == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ steps.preflight.outputs.artifact_09_id }}
+          path: ${{ runner.temp }}/g011-relay/09
+          skip-decompress: true
+          digest-mismatch: error
+      - name: Download immutable artifact 11
+        if: steps.preflight.outputs.winner == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ steps.preflight.outputs.artifact_10_id }}
+          path: ${{ runner.temp }}/g011-relay/10
+          skip-decompress: true
+          digest-mismatch: error
+      - name: Download immutable artifact 12
+        if: steps.preflight.outputs.winner == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ steps.preflight.outputs.artifact_11_id }}
+          path: ${{ runner.temp }}/g011-relay/11
+          skip-decompress: true
+          digest-mismatch: error
+      - name: Download immutable artifact 13
+        if: steps.preflight.outputs.winner == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ steps.preflight.outputs.artifact_12_id }}
+          path: ${{ runner.temp }}/g011-relay/12
+          skip-decompress: true
+          digest-mismatch: error
+      - name: Download immutable artifact 14
+        if: steps.preflight.outputs.winner == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ steps.preflight.outputs.artifact_13_id }}
+          path: ${{ runner.temp }}/g011-relay/13
+          skip-decompress: true
+          digest-mismatch: error
+      - name: Download immutable artifact 15
+        if: steps.preflight.outputs.winner == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ steps.preflight.outputs.artifact_14_id }}
+          path: ${{ runner.temp }}/g011-relay/14
+          skip-decompress: true
+          digest-mismatch: error
+      - name: Download immutable artifact 16
+        if: steps.preflight.outputs.winner == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ steps.preflight.outputs.artifact_15_id }}
+          path: ${{ runner.temp }}/g011-relay/15
+          skip-decompress: true
+          digest-mismatch: error
+      - name: Verify and publish payload/history identities, then quarantine
+        if: steps.preflight.outputs.winner == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCER_RUN_ID: ${{ github.event.workflow_run.id }}
+          PRODUCER_SHA: ${{ github.event.workflow_run.head_sha }}
+          NAMES: "[\"g011--gradle--wrapper--gradle-wrapper.jar\",\"g011--gradle--verification-metadata.xml\",\"g011--gradle--verification-keyring.keys\",\"g011--gradle.lockfile\",\"g011--app--gradle.lockfile\",\"g011--product--product-toolchain-manifest.json\",\"g011--app--src--test--resources--foundation--foundation-baseline-manifest.json\",\"g011--app--src--test--snapshots--images--foundation--home_compact_light.png\",\"g011--app--src--test--snapshots--images--foundation--home_compact_dark.png\",\"g011--app--src--test--snapshots--images--foundation--discover_compact_light.png\",\"g011--app--src--test--snapshots--images--foundation--discover_compact_dark.png\",\"g011--app--src--test--snapshots--images--foundation--library_compact_light.png\",\"g011--app--src--test--snapshots--images--foundation--library_compact_dark.png\",\"g011--app--src--test--snapshots--images--foundation--clips_compact_light.png\",\"g011--app--src--test--snapshots--images--foundation--clips_compact_dark.png\",\"g011--materialization-manifest.json\"]"
+        run: |
+          import base64,hashlib,json,os,pathlib,stat,urllib.error,urllib.parse,urllib.request
+          R='TJ-90/podcast-clip-app';CAP='1db11efa3612fc094018ce6af4e2153e3658ef6d';CAPT='5dadcddfd05bf10b237d07a502dd3778ef06780b';PID=316136777;T=os.environ['GH_TOKEN'];TMP=pathlib.Path(os.environ['RUNNER_TEMP']);PR=int(os.environ['PRODUCER_RUN_ID']);RR=int(os.environ['GITHUB_RUN_ID']);AT=int(os.environ['GITHUB_RUN_ATTEMPT']);SHA=os.environ['PRODUCER_SHA'];N=json.loads(os.environ['NAMES'])
+          def api(m,p,b=None,expect=(200,),collision=False):
+           d=None if b is None else json.dumps(b,separators=(',',':'),sort_keys=True).encode();q=urllib.request.Request('https://api.github.com'+p,data=d,method=m,headers={'Accept':'application/vnd.github+json','Authorization':'Bearer '+T,'X-GitHub-Api-Version':'2026-03-10','User-Agent':'g011-relay'})
+           try:
+            with urllib.request.urlopen(q,timeout=30) as x:
+             y=x.read(16777216)
+             if x.status not in expect:raise RuntimeError('status')
+             return json.loads(y) if y else None
+           except urllib.error.HTTPError as e:
+            e.read(4096)
+            if collision and e.code==422:return None
+            raise RuntimeError('api') from None
+          def uniq(p):
+           d={}
+           for k,v in p:
+            if k in d:raise RuntimeError('duplicate')
+            d[k]=v
+           return d
+          def canon(o):return json.dumps(o,separators=(',',':'),sort_keys=True).encode()
+          def gid(b):return hashlib.sha1(b'blob '+str(len(b)).encode()+b'\0'+b).hexdigest()
+          def blob(b):return api('POST',f'/repos/{R}/git/blobs',{'content':base64.b64encode(b).decode(),'encoding':'base64'},(201,))['sha']
+          def tree(base,path,b):return api('POST',f'/repos/{R}/git/trees',{'base_tree':base,'tree':[{'path':path,'mode':'100644','type':'blob','sha':b}]},(201,))['sha']
+          def commit(msg,t,p):return api('POST',f'/repos/{R}/git/commits',{'message':msg,'tree':t,'parents':[p]},(201,))['sha']
+          def mkref(r,s):return api('POST',f'/repos/{R}/git/refs',{'ref':'refs/heads/'+r,'sha':s},(201,),True)
+          def getref(r):return api('GET',f'/repos/{R}/git/ref/heads/{urllib.parse.quote(r,safe="/")}')['object']['sha']
+          meta=json.loads((TMP/'g011-relay-control/metadata.json').read_bytes());raws={};rows=[]
+          for n,name in enumerate(N):
+           e=list((TMP/'g011-relay'/f'{n:02d}').iterdir())
+           if len(e)!=1 or e[0].is_symlink() or not stat.S_ISREG(e[0].stat(follow_symlinks=False).st_mode):raise RuntimeError('shape')
+           b=e[0].read_bytes();h=hashlib.sha256(b).hexdigest();m=meta[name]
+           if len(b)>8388608 or m.get('size_in_bytes')!=len(b) or m.get('digest')!='sha256:'+h:raise RuntimeError('digest')
+           raws[name]=b;rows.append({'artifact_id':m['id'],'artifact_name':name,'archive_byte_length':len(b),'archive_sha256':h,'download_validation_state':'VERIFIED','member_blob_id':gid(b),'member_byte_length':len(b),'member_sha256':h})
+          man=json.loads(raws[N[-1]],object_pairs_hook=uniq);pl=man.get('payloads',[]);by={x.get('artifact_name'):x for x in pl}
+          if man.get('schema_version')!='g011-materialization-manifest-v1' or man.get('repository')!=R or man.get('run_id')!=PR or man.get('run_attempt')!=1 or len(pl)!=15 or set(by)!=set(N[:-1]):raise RuntimeError('manifest')
+          c=hashlib.sha256(f'{RR}:{AT}:{SHA}:payloads'.encode()).hexdigest();res=f'evidence/repo-native/g011-write-reservations-v1/hosted-relay/payload-set/{c}/cap-15/ord-67-81/{c}'
+          if mkref(res,SHA) is None or getref(res)!=SHA:raise RuntimeError('payload reservation')
+          posted=[]
+          for name in N[:-1]:
+           b=raws[name];p=by[name]
+           if p.get('member_byte_length')!=len(b) or p.get('member_sha256')!=hashlib.sha256(b).hexdigest() or p.get('git_blob_id')!=gid(b):raise RuntimeError('tuple')
+           x=blob(b)
+           if x!=gid(b):raise RuntimeError('blob')
+           posted.append({'artifact_name':name,'blob_id':x,'member_blob_write_state':'POSTED_PAYLOAD'})
+          rows[-1]['member_blob_write_state']='HASH_ONLY_NOT_POSTED';hc=hashlib.sha256(f'{RR}:{AT}:{SHA}:history'.encode()).hexdigest();hr=f'evidence/repo-native/g011-write-reservations-v1/hosted-relay/relay-materialization-history/{hc}/cap-3/ord-85-93/{hc}'
+          if mkref(hr,CAP) is None or getref(hr)!=CAP:raise RuntimeError('history reservation')
+          h={'history_version':'g011-materialization-history-v2','repository':R,'control_sha':SHA,'producer_run_id':PR,'relay_run_id':RR,'relay_run_attempt':AT,'artifacts':rows,'payload_blobs':posted,'manifest_member_blob_id':gid(raws[N[-1]]),'manifest_member_blob_write_state':'HASH_ONLY_NOT_POSTED','outcome':'HOSTED_RELAY_SUCCESS','next_operation_ordinal':112};b=blob(canon(h));t=tree(CAPT,f'evidence/repo-native/g011-materialization-history-v2/{SHA}/history.json',b);cs=commit('Bind hosted materialization transfer without exposing product bytes',t,CAP);rr=f'evidence/repo-native/g011-materialization-history-v2/{SHA}'
+          if mkref(rr,cs) is None or getref(rr)!=cs:raise RuntimeError('history')
+          api('PUT',f'/repos/{R}/actions/workflows/{PID}/disable',expect=(204,));api('GET',f'/repos/{R}/actions/workflows/{PID}');api('PUT',f'/repos/{R}/actions/workflows/product-foundation-relay.yml/disable',expect=(204,));api('GET',f'/repos/{R}/actions/workflows/product-foundation-relay.yml')
