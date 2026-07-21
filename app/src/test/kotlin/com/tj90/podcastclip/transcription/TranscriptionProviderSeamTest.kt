@@ -8,9 +8,14 @@ import okhttp3.Protocol
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 import java.io.IOException
 import kotlin.io.path.createTempFile
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35])
 class TranscriptionProviderSeamTest {
     @Test
     fun returnsTranscriptWithoutLeakingProviderJson() = runTest {
