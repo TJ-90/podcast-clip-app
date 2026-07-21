@@ -1,8 +1,9 @@
 # Third-party notices
 
-Podcast Clips is distributed under GPL-3.0-or-later and preserves the copyright and license notices of its selected upstream and dependencies.
+Podcast Clips is distributed under GPL-3.0-or-later. The shipped application is purpose-built and does not incorporate source from the evaluated podcast-app candidates documented in UPSTREAM.md.
 
-The initial candidate is PodAura by its contributors, sourced from https://github.com/SkyD666/PodAura at the exact commit recorded in `UPSTREAM.md` and the candidate provenance lock. If the approved fallback is used, AntennaPod attribution is recorded here before admission.
+Runtime and build libraries are resolved from the Gradle version catalog, including AndroidX/Jetpack Compose, Media3, OkHttp, Coil, Kotlin coroutines, JUnit, Truth, Robolectric, and AndroidX Test. Their respective licenses and notices remain authoritative.
 
-Dependency-specific notices remain in the imported source tree and are expanded by later license-inventory stories. Nothing in this file replaces the complete license text in `LICENSE`.
+Each successful Android CI run produces an SPDX JSON software bill of materials for the built APK and uploads it with dependency, checksum, lint, and test evidence. Nothing in this notice replaces the complete project license in LICENSE or the licenses of individual dependencies and services.
 
+Optional transcription sends an explicitly selected saved clip to Groq under the user’s own Groq account and applicable service terms; Groq code is not bundled into the app.

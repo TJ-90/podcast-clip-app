@@ -1,30 +1,38 @@
 # Podcast Clips
 
-Podcast Clips is a full Android podcast player built around one useful extra: save the exact part you want and optionally get its transcript.
+Podcast Clips is a full Android podcast player built around one useful extra: keep the exact part you want and optionally get its transcript.
 
-## What works in v1
+## v1
 
-- Search the public iTunes podcast directory or add any RSS feed
-- Subscribe and persist shows and episodes locally
-- Stream episodes with background playback, system controls, speed, and ±30 second seeking
-- Capture a precise 3 second–5 minute range around the current playhead
-- Export clips to local MP4 audio, replay them, and share them
-- Optionally transcribe a saved clip with Groq Whisper Large V3 Turbo
-- Keep the Groq API key encrypted by Android Keystore; no key is committed or embedded
-- Use light/dark editorial Compose UI with explicit empty, loading, and error states
+- Search Apple’s public podcast directory or add any RSS feed.
+- Subscribe locally and refresh recent episodes without an account.
+- Stream in the background with system media controls, speed control, precise seeking, a persistent **Up Next** queue, and last-position restoration.
+- Download or remove app-private offline episodes.
+- Select an exact 3-second–5-minute range; the editor defaults to the preceding 30 seconds.
+- Export a playable local AAC/M4A clip before any network request.
+- Replay, return to the source timestamp, delete with confirmation, or share audio, transcript text, or both.
+- Optionally send a saved clip to Groq whisper-large-v3-turbo.
+- Store the user-supplied Groq key with Android Keystore; no key is embedded or committed.
+- Use a restrained warm-paper/rust Compose UI in light and dark themes, with literal labels and explicit empty/loading/error states.
 
-Groq currently lists Whisper Large V3 Turbo at **$0.04 per audio hour**. A personal API key is optional; playback and local clipping work without one.
+Groq currently lists Whisper Large V3 Turbo at **$0.04 per audio hour**, with a minimum billed length per request. Playback and local clipping never require a key. If the network drops after an upload starts, the app marks the outcome unknown and asks the user to check provider usage before manually retrying; it never auto-resends a potentially billable request.
 
-## Build and verification
+## Hosted Android development
 
-Android development is intentionally remote-only for this repository. The Android CI workflow installs the Android toolchain, runs lint and unit tests, assembles the debug APK, renders deterministic UI baselines, and uploads reports/artifacts.
+The operator machine is intentionally not an Android build environment. [Android CI](.github/workflows/android-ci.yml) performs the entire development verification path on GitHub-hosted runners:
 
-Trigger **Android CI** from the Actions tab or push to main. Download the podcast-clips-debug-apk artifact from the completed run.
+1. install JDK, Android 36, and Gradle 9.4.1;
+2. run Android lint, JVM/Robolectric tests, build the debug APK, and render deterministic UI baselines;
+3. run CodeQL, a tracked-source credential scan, APK SHA-256 generation, and an SPDX JSON SBOM;
+4. boot an Android 35 emulator, run instrumentation tests, launch the app, and capture a runtime screenshot;
+5. upload the APK, checksum, SBOM, test/lint reports, baselines, and device evidence.
 
-## Privacy
+Every external action is pinned to a full commit SHA and workflow permissions are explicit. No Android artifact is downloaded to the operator device.
 
-Podcast RSS and audio requests go directly to their publishers. Discovery searches use Apple’s public iTunes Search API. Only a clip explicitly submitted for transcription is sent to Groq. The API key stays encrypted on the device.
+## Privacy and storage
+
+RSS and audio requests go directly to publishers. Discovery uses Apple’s iTunes Search API. Episodes, queue state, playback position, clips, and transcripts stay in app-private storage. Only a clip explicitly submitted for transcription is sent to Groq.
 
 ## License
 
-GPL-3.0-or-later. See LICENSE, UPSTREAM.md, and THIRD_PARTY_NOTICES.md.
+GPL-3.0-or-later. See [LICENSE](LICENSE), [UPSTREAM.md](UPSTREAM.md), and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

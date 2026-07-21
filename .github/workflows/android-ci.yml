@@ -20,6 +20,7 @@ on:
 
 permissions:
   contents: read
+  security-events: write
 
 concurrency:
   group: android-ci-${{ github.ref }}
@@ -27,9 +28,9 @@ concurrency:
 
 jobs:
   verify:
-    name: Lint, test, build, render
+    name: Lint, test, build, secure, package
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     env:
       GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g
 
@@ -55,15 +56,54 @@ jobs:
           gradle-version: "9.4.1"
           cache-read-only: ${{ github.event_name == 'pull_request' }}
 
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@b7351df727350dca84cb9d725d57dcf5bc82ba26
+        with:
+          languages: java-kotlin
+          build-mode: manual
+
       - name: Lint, test, assemble, and render
         run: gradle --no-daemon --stacktrace lintDebug testDebugUnitTest assembleDebug renderUiBaselines
+
+      - name: Analyze Kotlin and Java
+        uses: github/codeql-action/analyze@b7351df727350dca84cb9d725d57dcf5bc82ba26
+        with:
+          category: /language:java-kotlin
+
+      - name: Scan tracked source for committed credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git grep -nEI 'gsk_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{30,}|BEGIN (RSA|EC|OPENSSH) PRIVATE KEY' -- .; then
+            echo "Potential committed credential detected"
+            exit 1
+          fi
+
+      - name: Create checksum and dependency evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p app/build/reports/package
+          sha256sum app/build/outputs/apk/debug/app-debug.apk             > app/build/reports/package/app-debug.apk.sha256
+          gradle --no-daemon :app:dependencies --configuration debugRuntimeClasspath             > app/build/reports/package/debug-runtime-dependencies.txt
+          git ls-files -z | sort -z | xargs -0 sha256sum             > app/build/reports/package/tracked-source.sha256
+
+      - name: Generate APK SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        with:
+          file: app/build/outputs/apk/debug/app-debug.apk
+          format: spdx-json
+          output-file: app/build/reports/package/podcast-clips.spdx.json
+          upload-artifact: false
 
       - name: Upload debug APK
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: podcast-clips-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app/build/reports/package/app-debug.apk.sha256
           if-no-files-found: warn
           retention-days: 14
 
@@ -77,11 +117,12 @@ jobs:
             app/build/reports/tests/
             app/build/test-results/
             app/build/reports/ui-baselines/
+            app/build/reports/package/
           if-no-files-found: warn
           retention-days: 14
 
   device-smoke:
-    name: Emulator smoke test
+    name: Emulator behavior and visual smoke
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -101,11 +142,28 @@ jobs:
         with:
           gradle-version: "9.4.1"
 
-      - name: Launch app and navigate primary screens
+      - name: Run behavior tests and capture the app
         uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
         with:
           api-level: 35
           arch: x86_64
           profile: pixel_6
           disable-animations: true
-          script: gradle --no-daemon connectedDebugAndroidTest
+          script: |
+            gradle --no-daemon connectedDebugAndroidTest
+            adb shell am start -n com.tj90.podcastclip/.MainActivity
+            sleep 3
+            mkdir -p app/build/reports/device-smoke
+            adb exec-out screencap -p > app/build/reports/device-smoke/home.png
+
+      - name: Upload device evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: podcast-clips-device-evidence
+          path: |
+            app/build/reports/androidTests/
+            app/build/outputs/androidTest-results/
+            app/build/reports/device-smoke/
+          if-no-files-found: warn
+          retention-days: 14
