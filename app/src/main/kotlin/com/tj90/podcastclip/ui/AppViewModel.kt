@@ -5,9 +5,11 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.tj90.podcastclip.clipping.ClipExporter
 import com.tj90.podcastclip.data.local.PodcastStore
+import com.tj90.podcastclip.download.EpisodeDownloadManager
 import com.tj90.podcastclip.feed.RssFeedParser
 import com.tj90.podcastclip.model.Clip
 import com.tj90.podcastclip.model.Episode
+import com.tj90.podcastclip.model.PlaybackBookmark
 import com.tj90.podcastclip.model.Podcast
 import com.tj90.podcastclip.model.PodcastSearchResult
 import com.tj90.podcastclip.model.TranscriptState
@@ -15,6 +17,8 @@ import com.tj90.podcastclip.model.stableId
 import com.tj90.podcastclip.playback.PlaybackConnection
 import com.tj90.podcastclip.playback.PlaybackUiState
 import com.tj90.podcastclip.repository.PodcastRepository
+import com.tj90.podcastclip.transcription.GroqOutcomeUnknownException
+import com.tj90.podcastclip.transcription.GroqRateLimitException
 import com.tj90.podcastclip.transcription.GroqTranscriptionProvider
 import com.tj90.podcastclip.transcription.SecureApiKeyStore
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -43,6 +47,8 @@ data class AppUiState(
     val podcasts: List<Podcast> = emptyList(),
     val episodes: List<Episode> = emptyList(),
     val clips: List<Clip> = emptyList(),
+    val queue: List<Episode> = emptyList(),
+    val downloadingIds: Set<String> = emptySet(),
     val player: PlaybackUiState = PlaybackUiState(),
     val searchQuery: String = "",
     val searchResults: List<PodcastSearchResult> = emptyList(),
@@ -60,15 +66,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = PodcastRepository(store, RssFeedParser())
     private val playback = PlaybackConnection(application)
     private val clipExporter = ClipExporter(application)
+    private val downloadManager = EpisodeDownloadManager(application)
     private val transcriptionProvider = GroqTranscriptionProvider()
     private val keyStore = SecureApiKeyStore(application)
     private val mutableState = MutableStateFlow(
         AppUiState(apiKeyDraft = keyStore.read())
     )
+    private var lastBookmarkSavedAt = 0L
 
     val state: StateFlow<AppUiState> = mutableState
 
     init {
+        playback.onEnded = ::playNextInQueue
         viewModelScope.launch {
             repository.podcasts.collect { value ->
                 mutableState.update { it.copy(podcasts = value) }
@@ -85,8 +94,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         viewModelScope.launch {
+            store.queue.collect { value ->
+                mutableState.update { it.copy(queue = value) }
+            }
+        }
+        viewModelScope.launch {
             playback.state.collect { value ->
                 mutableState.update { it.copy(player = value) }
+                persistBookmarkIfDue(value)
+            }
+        }
+        store.loadPlaybackBookmark()?.let { bookmark ->
+            store.findEpisode(bookmark.episodeId)?.let { episode ->
+                playback.restore(episode, bookmark.positionMs, bookmark.speed)
             }
         }
         if (repository.podcasts.value.isNotEmpty()) refreshLibrary(silent = true)
@@ -152,7 +172,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun play(episode: Episode) {
-        playback.play(episode)
+        store.removeFromQueue(episode.id)
+        playback.play(store.findEpisode(episode.id) ?: episode)
         mutableState.update { it.copy(playerOpen = true) }
     }
 
@@ -173,11 +194,76 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         mutableState.update { it.copy(playerOpen = open) }
     }
 
+    fun enqueue(episode: Episode) {
+        if (state.value.queue.any { it.id == episode.id }) {
+            mutableState.update { it.copy(message = "Already in Up Next") }
+            return
+        }
+        store.enqueue(episode.id)
+        mutableState.update { it.copy(message = "Added to Up Next") }
+    }
+
+    fun removeFromQueue(episode: Episode) {
+        store.removeFromQueue(episode.id)
+    }
+
+    fun clearQueue() {
+        store.clearQueue()
+        mutableState.update { it.copy(message = "Up Next cleared") }
+    }
+
+    fun playNextInQueue() {
+        val next = store.queue.value.firstOrNull() ?: return
+        play(next)
+    }
+
+    fun downloadEpisode(episode: Episode) {
+        if (episode.isDownloaded || episode.id in state.value.downloadingIds) return
+        viewModelScope.launch {
+            mutableState.update {
+                it.copy(downloadingIds = it.downloadingIds + episode.id)
+            }
+            runCatching { downloadManager.download(episode) }
+                .onSuccess { file ->
+                    store.saveDownloadedPath(episode.id, file.absolutePath)
+                    mutableState.update {
+                        it.copy(
+                            downloadingIds = it.downloadingIds - episode.id,
+                            message = "Episode ready offline"
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    mutableState.update {
+                        it.copy(downloadingIds = it.downloadingIds - episode.id)
+                    }
+                    showFailure(error)
+                }
+        }
+    }
+
+    fun removeDownload(episode: Episode) {
+        viewModelScope.launch {
+            runCatching {
+                check(downloadManager.delete(episode.downloadedPath)) {
+                    "Could not remove the offline episode"
+                }
+                store.saveDownloadedPath(episode.id, "")
+            }.onSuccess {
+                mutableState.update { it.copy(message = "Offline copy removed") }
+            }.onFailure(::showFailure)
+        }
+    }
+
     fun openClipEditor() {
         val playerState = state.value.player
         val episode = playerState.episode
         if (episode == null) {
             mutableState.update { it.copy(message = "Play an episode before making a clip") }
+            return
+        }
+        if (episode.id.startsWith("clip-")) {
+            mutableState.update { it.copy(message = "Open the source episode to make another clip") }
             return
         }
         if (playerState.positionMs < ClipExporter.MIN_CLIP_MS) {
@@ -210,11 +296,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val editor = current.clipEditor ?: return@update current
             val boundedStart = startMs.coerceIn(0, editor.durationMs)
             val boundedEnd = endMs.coerceIn(0, editor.durationMs)
-            if (boundedEnd - boundedStart < ClipExporter.MIN_CLIP_MS) current
-            else if (boundedEnd - boundedStart > ClipExporter.MAX_CLIP_MS) current
-            else current.copy(
-                clipEditor = editor.copy(startMs = boundedStart, endMs = boundedEnd)
-            )
+            if (boundedEnd - boundedStart !in ClipExporter.MIN_CLIP_MS..ClipExporter.MAX_CLIP_MS) {
+                current
+            } else {
+                current.copy(clipEditor = editor.copy(startMs = boundedStart, endMs = boundedEnd))
+            }
         }
     }
 
@@ -236,16 +322,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun saveClip(transcribe: Boolean) {
         val editor = state.value.clipEditor ?: return
+        val hasKey = keyStore.read().isNotBlank()
         viewModelScope.launch {
             mutableState.update {
                 it.copy(clipEditor = editor.copy(saving = true))
             }
             runCatching {
-                val file = clipExporter.export(
-                    editor.episode,
-                    editor.startMs,
-                    editor.endMs
-                )
+                val file = clipExporter.export(editor.episode, editor.startMs, editor.endMs)
                 val now = System.currentTimeMillis()
                 val clip = Clip(
                     id = stableId(editor.episode.id + ":" + editor.startMs + ":" + now),
@@ -258,12 +341,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     endMs = editor.endMs,
                     createdAt = now,
                     transcript = "",
-                    transcriptState = if (transcribe) {
-                        TranscriptState.SENDING
-                    } else {
-                        TranscriptState.LOCAL_ONLY
+                    transcriptState = when {
+                        !transcribe -> TranscriptState.LOCAL_ONLY
+                        hasKey -> TranscriptState.SENDING
+                        else -> TranscriptState.AWAITING_KEY
                     },
-                    transcriptError = ""
+                    transcriptError = if (transcribe && !hasKey) {
+                        "Add a Groq API key in Settings when you are ready to upload this clip."
+                    } else {
+                        ""
+                    }
                 )
                 repository.saveClip(clip)
                 clip
@@ -272,14 +359,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     it.copy(
                         clipEditor = null,
                         destination = PrimaryDestination.CLIPS,
-                        message = if (transcribe) {
-                            "Clip saved. Sending it for transcription…"
-                        } else {
-                            "Clip saved locally"
+                        settingsOpen = transcribe && !hasKey,
+                        message = when {
+                            !transcribe -> "Clip saved locally"
+                            hasKey -> "Clip saved. Sending it for transcription…"
+                            else -> "Clip saved locally; add a key when ready"
                         }
                     )
                 }
-                if (transcribe) transcribeClip(clip)
+                if (transcribe && hasKey) transcribeClip(clip)
             }.onFailure(::showFailure)
         }
     }
@@ -291,8 +379,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 repository.updateTranscript(
                     clip.id,
                     clip.transcript,
-                    TranscriptState.FAILED,
-                    "Add a Groq API key in Settings"
+                    TranscriptState.AWAITING_KEY,
+                    "Add a Groq API key in Settings when you are ready to upload this clip."
                 )
             }
             mutableState.update {
@@ -305,24 +393,58 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             runCatching {
                 transcriptionProvider.transcribe(File(clip.filePath), apiKey)
             }.onSuccess { transcript ->
-                repository.updateTranscript(
-                    clip.id,
-                    transcript,
-                    TranscriptState.COMPLETE
-                )
+                repository.updateTranscript(clip.id, transcript, TranscriptState.COMPLETE)
                 mutableState.update { it.copy(message = "Transcript ready") }
             }.onFailure { error ->
+                val state = when (error) {
+                    is GroqRateLimitException -> TranscriptState.RATE_LIMITED
+                    is GroqOutcomeUnknownException -> TranscriptState.OUTCOME_UNKNOWN
+                    else -> TranscriptState.FAILED
+                }
                 repository.updateTranscript(
                     clip.id,
                     clip.transcript,
-                    TranscriptState.FAILED,
+                    state,
                     error.readableMessage()
                 )
                 mutableState.update {
-                    it.copy(message = "Transcript failed; the local clip is safe")
+                    it.copy(
+                        message = if (state == TranscriptState.OUTCOME_UNKNOWN) {
+                            "Groq did not confirm the result; check usage before retrying"
+                        } else {
+                            "Transcript failed; the local clip is safe"
+                        }
+                    )
                 }
             }
         }
+    }
+
+    fun deleteClip(clip: Clip) {
+        viewModelScope.launch {
+            runCatching {
+                val directory = File(getApplication<Application>().filesDir, "clips").canonicalFile
+                val file = File(clip.filePath).canonicalFile
+                require(file.parentFile == directory) {
+                    "Refusing to delete a file outside clip storage"
+                }
+                if (file.exists()) check(file.delete()) { "Could not delete the clip audio" }
+                store.deleteClip(clip.id)
+            }.onSuccess {
+                mutableState.update { it.copy(message = "Clip deleted") }
+            }.onFailure(::showFailure)
+        }
+    }
+
+    fun playSource(clip: Clip) {
+        val source = store.findEpisode(clip.episodeId)
+        if (source == null) {
+            mutableState.update { it.copy(message = "Source episode is no longer in the library") }
+            return
+        }
+        mutableState.update { it.copy(destination = PrimaryDestination.HOME) }
+        play(source)
+        seekTo(clip.startMs)
     }
 
     fun setAddRssOpen(open: Boolean) {
@@ -355,6 +477,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         mutableState.update { it.copy(message = "") }
     }
 
+    private fun persistBookmarkIfDue(playerState: PlaybackUiState) {
+        val episode = playerState.episode ?: return
+        if (episode.id.startsWith("clip-") || playerState.positionMs <= 0) return
+        val now = System.currentTimeMillis()
+        if (now - lastBookmarkSavedAt < BOOKMARK_INTERVAL_MS) return
+        lastBookmarkSavedAt = now
+        store.savePlaybackBookmark(
+            PlaybackBookmark(
+                episodeId = episode.id,
+                positionMs = playerState.positionMs,
+                speed = playerState.speed
+            )
+        )
+    }
+
     private fun showFailure(error: Throwable) {
         mutableState.update {
             it.copy(busyLabel = "", message = error.readableMessage())
@@ -367,8 +504,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             ?: "Something went wrong. Your saved library is unchanged."
 
     override fun onCleared() {
+        state.value.player.let { player ->
+            val episode = player.episode
+            if (episode != null && !episode.id.startsWith("clip-") && player.positionMs > 0) {
+                store.savePlaybackBookmark(
+                    PlaybackBookmark(episode.id, player.positionMs, player.speed)
+                )
+            }
+        }
         playback.close()
         store.close()
         super.onCleared()
+    }
+
+    private companion object {
+        const val BOOKMARK_INTERVAL_MS = 5_000L
     }
 }

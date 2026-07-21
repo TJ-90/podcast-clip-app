@@ -29,13 +29,13 @@ class ClipExporter(private val context: Context) {
             val directory = File(context.filesDir, "clips").apply { mkdirs() }
             val output = File(
                 directory,
-                stableId(episode.id + ":" + startMs + ":" + endMs + ":" + System.nanoTime()) + ".mp4"
+                stableId(episode.id + ":" + startMs + ":" + endMs + ":" + System.nanoTime()) + ".m4a"
             )
             if (output.exists()) output.delete()
 
             suspendCancellableCoroutine { continuation ->
                 val mediaItem = MediaItem.Builder()
-                    .setUri(episode.audioUrl)
+                    .setUri(episode.playableUri)
                     .setClippingConfiguration(
                         MediaItem.ClippingConfiguration.Builder()
                             .setStartPositionMs(startMs)

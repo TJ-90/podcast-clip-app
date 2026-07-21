@@ -196,6 +196,9 @@ fun PodcastClipApp(viewModel: AppViewModel = viewModel()) {
                         modifier = pageModifier,
                         onSettings = { viewModel.setSettingsOpen(true) },
                         onPlay = viewModel::play,
+                        onQueue = viewModel::enqueue,
+                        onDownload = viewModel::downloadEpisode,
+                        onRemoveDownload = viewModel::removeDownload,
                         onDiscover = {
                             viewModel.selectDestination(PrimaryDestination.DISCOVER)
                         }
@@ -213,6 +216,11 @@ fun PodcastClipApp(viewModel: AppViewModel = viewModel()) {
                         modifier = pageModifier,
                         onRefresh = { viewModel.refreshLibrary() },
                         onPlay = viewModel::play,
+                        onQueue = viewModel::enqueue,
+                        onRemoveFromQueue = viewModel::removeFromQueue,
+                        onClearQueue = viewModel::clearQueue,
+                        onDownload = viewModel::downloadEpisode,
+                        onRemoveDownload = viewModel::removeDownload,
                         onDiscover = {
                             viewModel.selectDestination(PrimaryDestination.DISCOVER)
                         }
@@ -221,7 +229,9 @@ fun PodcastClipApp(viewModel: AppViewModel = viewModel()) {
                         state = state,
                         modifier = pageModifier,
                         onPlay = viewModel::playClip,
+                        onSource = viewModel::playSource,
                         onTranscribe = viewModel::transcribeClip,
+                        onDelete = viewModel::deleteClip,
                         onSettings = { viewModel.setSettingsOpen(true) }
                     )
                 }
@@ -276,6 +286,9 @@ private fun HomeScreen(
     modifier: Modifier,
     onSettings: () -> Unit,
     onPlay: (Episode) -> Unit,
+    onQueue: (Episode) -> Unit,
+    onDownload: (Episode) -> Unit,
+    onRemoveDownload: (Episode) -> Unit,
     onDiscover: () -> Unit
 ) {
     val featured = state.player.episode ?: state.episodes.firstOrNull()
@@ -315,7 +328,17 @@ private fun HomeScreen(
         if (state.episodes.isNotEmpty()) {
             item { SectionLabel("Latest from your library") }
             items(state.episodes.take(12), key = { it.id }) { episode ->
-                EpisodeRow(episode, onPlay = { onPlay(episode) })
+                EpisodeRow(
+                    episode = episode,
+                    queued = state.queue.any { it.id == episode.id },
+                    downloading = episode.id in state.downloadingIds,
+                    onPlay = { onPlay(episode) },
+                    onQueue = { onQueue(episode) },
+                    onOffline = {
+                        if (episode.isDownloaded) onRemoveDownload(episode)
+                        else onDownload(episode)
+                    }
+                )
             }
         }
     }
@@ -394,6 +417,11 @@ private fun LibraryScreen(
     modifier: Modifier,
     onRefresh: () -> Unit,
     onPlay: (Episode) -> Unit,
+    onQueue: (Episode) -> Unit,
+    onRemoveFromQueue: (Episode) -> Unit,
+    onClearQueue: () -> Unit,
+    onDownload: (Episode) -> Unit,
+    onRemoveDownload: (Episode) -> Unit,
     onDiscover: () -> Unit
 ) {
     LazyColumn(
@@ -424,12 +452,47 @@ private fun LibraryScreen(
             items(state.podcasts, key = { it.feedUrl }) { podcast ->
                 PodcastRow(podcast)
             }
+            if (state.queue.isNotEmpty()) {
+                item {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        SectionLabel("Up Next · " + state.queue.size)
+                        TextButton(onClick = onClearQueue) { Text("Clear") }
+                    }
+                }
+                items(state.queue, key = { "queue-" + it.id }) { episode ->
+                    EpisodeRow(
+                        episode = episode,
+                        queued = true,
+                        downloading = episode.id in state.downloadingIds,
+                        onPlay = { onPlay(episode) },
+                        onQueue = { onRemoveFromQueue(episode) },
+                        onOffline = {
+                            if (episode.isDownloaded) onRemoveDownload(episode)
+                            else onDownload(episode)
+                        }
+                    )
+                }
+            }
             item {
                 Spacer(Modifier.height(6.dp))
                 SectionLabel("Recent episodes")
             }
             items(state.episodes, key = { it.id }) { episode ->
-                EpisodeRow(episode, onPlay = { onPlay(episode) })
+                EpisodeRow(
+                    episode = episode,
+                    queued = state.queue.any { it.id == episode.id },
+                    downloading = episode.id in state.downloadingIds,
+                    onPlay = { onPlay(episode) },
+                    onQueue = { onQueue(episode) },
+                    onOffline = {
+                        if (episode.isDownloaded) onRemoveDownload(episode)
+                        else onDownload(episode)
+                    }
+                )
             }
         }
     }
@@ -440,7 +503,9 @@ private fun ClipsScreen(
     state: AppUiState,
     modifier: Modifier,
     onPlay: (Clip) -> Unit,
+    onSource: (Clip) -> Unit,
     onTranscribe: (Clip) -> Unit,
+    onDelete: (Clip) -> Unit,
     onSettings: () -> Unit
 ) {
     val context = LocalContext.current
@@ -472,8 +537,12 @@ private fun ClipsScreen(
                 ClipRow(
                     clip = clip,
                     onPlay = { onPlay(clip) },
+                    onSource = { onSource(clip) },
                     onTranscribe = { onTranscribe(clip) },
-                    onShare = { shareClip(context, clip) }
+                    onShareAudio = { shareClip(context, clip, ShareMode.AUDIO) },
+                    onShareText = { shareClip(context, clip, ShareMode.TEXT) },
+                    onShareBoth = { shareClip(context, clip, ShareMode.BOTH) },
+                    onDelete = { onDelete(clip) }
                 )
             }
         }
@@ -565,53 +634,86 @@ private fun FeatureEpisode(
 }
 
 @Composable
-private fun EpisodeRow(episode: Episode, onPlay: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onPlay)
-            .padding(vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-        Artwork(episode.artworkUrl, Modifier.size(64.dp))
-        Column(Modifier.weight(1f)) {
-            Text(
-                episode.title,
-                fontWeight = FontWeight.Bold,
-                fontSize = 16.sp,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                episode.podcastTitle,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                if (episode.publishedAt > 0) {
-                    Text(
-                        DateFormat.getDateInstance(DateFormat.MEDIUM)
-                            .format(Date(episode.publishedAt)),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 12.sp
-                    )
-                }
-                if (episode.durationMs > 0) {
-                    Text(
-                        formatTime(episode.durationMs),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 12.sp
-                    )
+private fun EpisodeRow(
+    episode: Episode,
+    queued: Boolean,
+    downloading: Boolean,
+    onPlay: () -> Unit,
+    onQueue: () -> Unit,
+    onOffline: () -> Unit
+) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onPlay)
+                .padding(top = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Artwork(episode.artworkUrl, Modifier.size(64.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    episode.title,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    episode.podcastTitle,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (episode.publishedAt > 0) {
+                        Text(
+                            DateFormat.getDateInstance(DateFormat.MEDIUM)
+                                .format(Date(episode.publishedAt)),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 12.sp
+                        )
+                    }
+                    if (episode.durationMs > 0) {
+                        Text(
+                            formatTime(episode.durationMs),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 12.sp
+                        )
+                    }
+                    if (episode.isDownloaded) {
+                        Text(
+                            "Offline",
+                            color = MaterialTheme.colorScheme.primary,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
             }
+            Text("Play", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
         }
-        Text("Play", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+        Row(
+            modifier = Modifier.padding(start = 72.dp, bottom = 5.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            TextButton(onClick = onQueue) {
+                Text(if (queued) "Remove from Up Next" else "Add to Up Next")
+            }
+            TextButton(onClick = onOffline, enabled = !downloading) {
+                Text(
+                    when {
+                        downloading -> "Downloading…"
+                        episode.isDownloaded -> "Remove download"
+                        else -> "Download"
+                    }
+                )
+            }
+        }
     }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
 }
-
 @Composable
 private fun PodcastRow(podcast: Podcast) {
     Row(
@@ -688,9 +790,30 @@ private fun SearchResultRow(
 private fun ClipRow(
     clip: Clip,
     onPlay: () -> Unit,
+    onSource: () -> Unit,
     onTranscribe: () -> Unit,
-    onShare: () -> Unit
+    onShareAudio: () -> Unit,
+    onShareText: () -> Unit,
+    onShareBoth: () -> Unit,
+    onDelete: () -> Unit
 ) {
+    var confirmDelete by remember(clip.id) { mutableStateOf(false) }
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Delete this clip?") },
+            text = { Text("The local audio and transcript will be removed from this device.") },
+            confirmButton = {
+                Button(onClick = {
+                    confirmDelete = false
+                    onDelete()
+                }) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDelete = false }) { Text("Keep clip") }
+            }
+        )
+    }
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surface,
@@ -719,44 +842,63 @@ private fun ClipRow(
                 }
             }
             when (clip.transcriptState) {
-                TranscriptState.COMPLETE -> {
-                    Text(
-                        clip.transcript,
-                        lineHeight = 22.sp,
-                        maxLines = 8,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
+                TranscriptState.COMPLETE -> Text(
+                    clip.transcript,
+                    lineHeight = 22.sp,
+                    maxLines = 12,
+                    overflow = TextOverflow.Ellipsis
+                )
                 TranscriptState.SENDING -> {
                     LinearProgressIndicator(Modifier.fillMaxWidth())
-                    Text("Sending clip for transcription…")
+                    Text("Uploading this saved clip to Groq for transcription…")
                 }
-                TranscriptState.FAILED -> {
-                    Text(
-                        clip.transcriptError.ifBlank { "Transcription failed" },
-                        color = MaterialTheme.colorScheme.error
-                    )
-                }
-                TranscriptState.LOCAL_ONLY -> {
-                    Text(
-                        "Saved locally. No audio has been uploaded.",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+                TranscriptState.LOCAL_ONLY -> Text(
+                    "Saved locally. No audio has been uploaded.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                TranscriptState.AWAITING_KEY -> Text(
+                    clip.transcriptError.ifBlank { "Add a Groq API key when you are ready to upload." },
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                TranscriptState.RATE_LIMITED -> Text(
+                    clip.transcriptError.ifBlank { "Groq rate-limited this request. Retry later." },
+                    color = MaterialTheme.colorScheme.error
+                )
+                TranscriptState.OUTCOME_UNKNOWN -> Text(
+                    clip.transcriptError.ifBlank {
+                        "Groq did not confirm the result. Check usage before retrying to avoid a duplicate charge."
+                    },
+                    color = MaterialTheme.colorScheme.error
+                )
+                TranscriptState.FAILED -> Text(
+                    clip.transcriptError.ifBlank { "Transcription failed" },
+                    color = MaterialTheme.colorScheme.error
+                )
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                TextButton(onClick = onPlay) { Text("Play clip") }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = onPlay) { Text("Play") }
+                TextButton(onClick = onSource) { Text("Source") }
                 if (clip.transcriptState != TranscriptState.COMPLETE &&
                     clip.transcriptState != TranscriptState.SENDING
                 ) {
-                    TextButton(onClick = onTranscribe) { Text("Transcribe") }
+                    TextButton(onClick = onTranscribe) {
+                        Text(if (clip.transcriptState == TranscriptState.OUTCOME_UNKNOWN) "Retry manually" else "Transcribe")
+                    }
                 }
-                TextButton(onClick = onShare) { Text("Share") }
+                TextButton(onClick = { confirmDelete = true }) { Text("Delete") }
+            }
+            Text("SHARE", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = onShareAudio) { Text("Audio") }
+                TextButton(
+                    onClick = onShareText,
+                    enabled = clip.transcript.isNotBlank()
+                ) { Text("Text") }
+                TextButton(onClick = onShareBoth) { Text("Both") }
             }
         }
     }
 }
-
 @Composable
 private fun MiniPlayer(
     episode: Episode,
@@ -1204,7 +1346,9 @@ private fun formatTimePrecise(milliseconds: Long): String {
 private fun speedLabel(speed: Float): String =
     if (speed % 1f == 0f) speed.toInt().toString() + "×" else speed.toString() + "×"
 
-private fun shareClip(context: android.content.Context, clip: Clip) {
+private enum class ShareMode { AUDIO, TEXT, BOTH }
+
+private fun shareClip(context: android.content.Context, clip: Clip, mode: ShareMode) {
     val file = File(clip.filePath)
     if (!file.exists()) return
     val uri: Uri = FileProvider.getUriForFile(
@@ -1222,11 +1366,17 @@ private fun shareClip(context: android.content.Context, clip: Clip) {
         }
     }
     val intent = Intent(Intent.ACTION_SEND).apply {
-        type = "audio/mp4"
-        putExtra(Intent.EXTRA_STREAM, uri)
-        putExtra(Intent.EXTRA_TEXT, text)
-        clipData = ClipData.newRawUri("Podcast clip", uri)
-        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        type = when (mode) {
+            ShareMode.AUDIO -> "audio/mp4"
+            ShareMode.TEXT -> "text/plain"
+            ShareMode.BOTH -> "audio/mp4"
+        }
+        if (mode != ShareMode.TEXT) {
+            putExtra(Intent.EXTRA_STREAM, uri)
+            clipData = ClipData.newRawUri("Podcast clip", uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        if (mode != ShareMode.AUDIO) putExtra(Intent.EXTRA_TEXT, text)
     }
     context.startActivity(Intent.createChooser(intent, "Share clip"))
 }

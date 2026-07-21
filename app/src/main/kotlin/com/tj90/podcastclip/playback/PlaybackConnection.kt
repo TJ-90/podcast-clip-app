@@ -33,6 +33,13 @@ data class PlaybackUiState(
 )
 
 class PlaybackConnection(context: Context) : Player.Listener, Closeable {
+    private data class PendingMedia(
+        val episode: Episode,
+        val positionMs: Long,
+        val speed: Float,
+        val autoplay: Boolean
+    )
+
     private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val mutableState = MutableStateFlow(PlaybackUiState())
@@ -42,7 +49,11 @@ class PlaybackConnection(context: Context) : Player.Listener, Closeable {
     ).buildAsync()
 
     private var controller: MediaController? = null
+    private var pendingMedia: PendingMedia? = null
     private var ticker: Job? = null
+    private var endedMediaId: String? = null
+
+    var onEnded: (() -> Unit)? = null
     val state: StateFlow<PlaybackUiState> = mutableState
 
     init {
@@ -52,6 +63,8 @@ class PlaybackConnection(context: Context) : Player.Listener, Closeable {
                     controller = readyController
                     readyController.addListener(this)
                     mutableState.value = mutableState.value.copy(connected = true)
+                    pendingMedia?.let(::load)
+                    pendingMedia = null
                     updateState()
                     startTicker()
                 }
@@ -61,23 +74,25 @@ class PlaybackConnection(context: Context) : Player.Listener, Closeable {
     }
 
     fun play(episode: Episode) {
-        val item = MediaItem.Builder()
-            .setMediaId(episode.id)
-            .setUri(episode.audioUrl)
-            .setMediaMetadata(
-                MediaMetadata.Builder()
-                    .setTitle(episode.title)
-                    .setArtist(episode.podcastTitle)
-                    .setArtworkUri(episode.artworkUrl.takeIf { it.isNotBlank() }?.let(Uri::parse))
-                    .build()
+        load(
+            PendingMedia(
+                episode = episode,
+                positionMs = 0,
+                speed = mutableState.value.speed,
+                autoplay = true
             )
-            .build()
-        mutableState.value = mutableState.value.copy(episode = episode)
-        controller?.apply {
-            setMediaItem(item)
-            prepare()
-            play()
-        }
+        )
+    }
+
+    fun restore(episode: Episode, positionMs: Long, speed: Float) {
+        load(
+            PendingMedia(
+                episode = episode,
+                positionMs = positionMs,
+                speed = speed,
+                autoplay = false
+            )
+        )
     }
 
     fun playClip(clip: Clip) {
@@ -98,10 +113,13 @@ class PlaybackConnection(context: Context) : Player.Listener, Closeable {
     fun toggle() {
         controller?.let { player ->
             if (player.isPlaying) player.pause() else player.play()
+        } ?: run {
+            pendingMedia = pendingMedia?.copy(autoplay = !(pendingMedia?.autoplay ?: false))
         }
     }
 
     fun pause() {
+        pendingMedia = pendingMedia?.copy(autoplay = false)
         controller?.pause()
     }
 
@@ -118,13 +136,53 @@ class PlaybackConnection(context: Context) : Player.Listener, Closeable {
     }
 
     fun setSpeed(speed: Float) {
-        controller?.setPlaybackSpeed(speed.coerceIn(0.5f, 3f))
+        val bounded = speed.coerceIn(0.5f, 3f)
+        pendingMedia = pendingMedia?.copy(speed = bounded)
+        controller?.setPlaybackSpeed(bounded)
         updateState()
     }
 
     override fun onEvents(player: Player, events: Player.Events) {
         updateState()
+        if (player.playbackState == Player.STATE_ENDED) {
+            val mediaId = player.currentMediaItem?.mediaId.orEmpty()
+            if (mediaId.isNotBlank() && endedMediaId != mediaId) {
+                endedMediaId = mediaId
+                onEnded?.invoke()
+            }
+        }
     }
+
+    private fun load(pending: PendingMedia) {
+        mutableState.value = mutableState.value.copy(
+            episode = pending.episode,
+            positionMs = pending.positionMs,
+            speed = pending.speed
+        )
+        val ready = controller
+        if (ready == null) {
+            pendingMedia = pending
+            return
+        }
+        endedMediaId = null
+        ready.setMediaItem(pending.episode.toMediaItem(), pending.positionMs.coerceAtLeast(0))
+        ready.setPlaybackSpeed(pending.speed.coerceIn(0.5f, 3f))
+        ready.prepare()
+        if (pending.autoplay) ready.play()
+    }
+
+    private fun Episode.toMediaItem(): MediaItem =
+        MediaItem.Builder()
+            .setMediaId(id)
+            .setUri(playableUri)
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle(title)
+                    .setArtist(podcastTitle)
+                    .setArtworkUri(artworkUrl.takeIf { it.isNotBlank() }?.let(Uri::parse))
+                    .build()
+            )
+            .build()
 
     private fun startTicker() {
         ticker?.cancel()

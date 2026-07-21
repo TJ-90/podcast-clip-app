@@ -9,11 +9,17 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
 import org.json.JSONObject
 import java.io.File
+import java.io.IOException
 import java.util.concurrent.TimeUnit
+
+class GroqRateLimitException(message: String) : IOException(message)
+class GroqOutcomeUnknownException(message: String, cause: Throwable) : IOException(message, cause)
+class GroqRequestException(message: String) : IOException(message)
 
 class GroqTranscriptionProvider(
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
         .readTimeout(90, TimeUnit.SECONDS)
         .build()
 ) : TranscriptionProvider {
@@ -22,6 +28,7 @@ class GroqTranscriptionProvider(
         withContext(Dispatchers.IO) {
             require(apiKey.isNotBlank()) { "Add a Groq API key in Settings first" }
             require(file.exists() && file.length() > 0) { "The saved clip file is missing" }
+            require(file.length() <= MAX_UPLOAD_BYTES) { "Clip exceeds Groq's 25 MB upload limit" }
             val body = MultipartBody.Builder()
                 .setType(MultipartBody.FORM)
                 .addFormDataPart("model", "whisper-large-v3-turbo")
@@ -37,18 +44,34 @@ class GroqTranscriptionProvider(
                 .header("Authorization", "Bearer $apiKey")
                 .post(body)
                 .build()
-            client.newCall(request).execute().use { response ->
-                val responseBody = response.body?.string().orEmpty()
-                if (!response.isSuccessful) {
+            val response = try {
+                client.newCall(request).execute()
+            } catch (error: IOException) {
+                throw GroqOutcomeUnknownException(
+                    "Groq did not confirm the result. Check usage before retrying to avoid a duplicate charge.",
+                    error
+                )
+            }
+            response.use {
+                val responseBody = it.body?.string().orEmpty()
+                if (!it.isSuccessful) {
                     val detail = runCatching {
                         JSONObject(responseBody)
                             .optJSONObject("error")
                             ?.optString("message")
                     }.getOrNull().orEmpty()
-                    error(detail.ifBlank { "Transcription failed with HTTP " + response.code })
+                    val message = detail.ifBlank {
+                        "Transcription failed with HTTP " + it.code
+                    }
+                    if (it.code == 429) throw GroqRateLimitException(message)
+                    throw GroqRequestException(message)
                 }
                 JSONObject(responseBody).optString("text").trim()
-                    .ifBlank { error("Groq returned an empty transcript") }
+                    .ifBlank { throw GroqRequestException("Groq returned an empty transcript") }
             }
         }
+
+    private companion object {
+        const val MAX_UPLOAD_BYTES = 25L * 1024L * 1024L
+    }
 }
