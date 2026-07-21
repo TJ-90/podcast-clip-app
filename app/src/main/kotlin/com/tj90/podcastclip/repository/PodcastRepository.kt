@@ -26,7 +26,7 @@ class PodcastRepository(
     val episodes = store.episodes
     val clips: StateFlow<List<Clip>> = store.clips
 
-    suspend fun subscribe(rawUrl: String) = withContext(Dispatchers.IO) {
+    suspend fun subscribe(rawUrl: String): Boolean = withContext(Dispatchers.IO) {
         val feedUrl = normalizeFeedUrl(rawUrl)
         val request = Request.Builder()
             .url(feedUrl)
@@ -40,6 +40,8 @@ class PodcastRepository(
             val feed = body.byteStream().use { parser.parse(it, feedUrl) }
             if (feed.episodes.isEmpty()) error("This feed has no playable audio episodes")
             store.upsertFeed(feed)
+            feedUrl.startsWith("http://") ||
+                feed.episodes.any { it.audioUrl.startsWith("http://") }
         }
     }
 

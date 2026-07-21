@@ -31,7 +31,7 @@ Every external action is pinned to a full commit SHA and workflow permissions ar
 
 ## Privacy and storage
 
-RSS and audio requests go directly to publishers. Discovery uses Apple’s iTunes Search API. Episodes, queue state, playback position, clips, and transcripts stay in app-private storage. Only a clip explicitly submitted for transcription is sent to Groq.
+RSS and audio requests go directly to publishers. Legacy HTTP-only feeds are supported, and the app warns when a publisher’s feed or audio is unencrypted. Discovery uses Apple’s iTunes Search API. Episodes, queue state, playback position, clips, and transcripts stay in app-private storage. Only a clip explicitly submitted for transcription is sent to Groq.
 
 ## License
 

@@ -142,12 +142,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             mutableState.update { it.copy(busyLabel = "Adding podcast…") }
             runCatching { repository.subscribe(feedUrl) }
-                .onSuccess {
+                .onSuccess { usesCleartext ->
                     mutableState.update {
                         it.copy(
                             busyLabel = "",
                             addRssOpen = false,
-                            message = "Podcast added to Library"
+                            message = if (usesCleartext) {
+                                "Podcast added. Its publisher uses unencrypted HTTP."
+                            } else {
+                                "Podcast added to Library"
+                            }
                         )
                     }
                 }

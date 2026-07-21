@@ -21,6 +21,8 @@ class GroqTranscriptionProvider(
         .connectTimeout(20, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
         .readTimeout(90, TimeUnit.SECONDS)
+        .followRedirects(false)
+        .followSslRedirects(false)
         .build()
 ) : TranscriptionProvider {
 
