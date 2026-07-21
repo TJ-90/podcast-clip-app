@@ -142,6 +142,9 @@ jobs:
         with:
           gradle-version: "9.4.1"
 
+      - name: Enable emulator hardware acceleration
+        run: sudo chmod 0666 /dev/kvm
+
       - name: Run behavior tests and capture the app
         uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
         with:
