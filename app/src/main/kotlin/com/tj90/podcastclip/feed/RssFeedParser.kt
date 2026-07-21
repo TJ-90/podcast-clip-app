@@ -122,7 +122,7 @@ class RssFeedParser {
     private fun cleanText(raw: String): String =
         raw.replace(Regex("<[^>]*>"), " ")
             .replace("&amp;", "&")
-            .replace("&quot;", """)
+            .replace("&quot;", "\"")
             .replace("&#39;", "'")
             .replace(Regex("\\s+"), " ")
             .trim()
