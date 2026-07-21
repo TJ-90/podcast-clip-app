@@ -44,30 +44,35 @@ class GroqTranscriptionProvider(
                 .header("Authorization", "Bearer $apiKey")
                 .post(body)
                 .build()
-            val response = try {
-                client.newCall(request).execute()
+            try {
+                client.newCall(request).execute().use { response ->
+                    val responseBody = response.body.string()
+                    if (!response.isSuccessful) {
+                        val detail = runCatching {
+                            JSONObject(responseBody)
+                                .optJSONObject("error")
+                                ?.optString("message")
+                        }.getOrNull().orEmpty()
+                        val message = detail.ifBlank {
+                            "Transcription failed with HTTP " + response.code
+                        }
+                        if (response.code == 429) throw GroqRateLimitException(message)
+                        throw GroqRequestException(message)
+                    }
+                    JSONObject(responseBody).optString("text").trim()
+                        .ifBlank { throw GroqRequestException("Groq returned an empty transcript") }
+                }
+            } catch (error: GroqRateLimitException) {
+                throw error
+            } catch (error: GroqRequestException) {
+                throw error
+            } catch (error: GroqOutcomeUnknownException) {
+                throw error
             } catch (error: IOException) {
                 throw GroqOutcomeUnknownException(
                     "Groq did not confirm the result. Check usage before retrying to avoid a duplicate charge.",
                     error
                 )
-            }
-            response.use {
-                val responseBody = it.body?.string().orEmpty()
-                if (!it.isSuccessful) {
-                    val detail = runCatching {
-                        JSONObject(responseBody)
-                            .optJSONObject("error")
-                            ?.optString("message")
-                    }.getOrNull().orEmpty()
-                    val message = detail.ifBlank {
-                        "Transcription failed with HTTP " + it.code
-                    }
-                    if (it.code == 429) throw GroqRateLimitException(message)
-                    throw GroqRequestException(message)
-                }
-                JSONObject(responseBody).optString("text").trim()
-                    .ifBlank { throw GroqRequestException("Groq returned an empty transcript") }
             }
         }
 

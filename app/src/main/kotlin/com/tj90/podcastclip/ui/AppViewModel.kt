@@ -343,7 +343,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     transcript = "",
                     transcriptState = when {
                         !transcribe -> TranscriptState.LOCAL_ONLY
-                        hasKey -> TranscriptState.SENDING
+                        hasKey -> TranscriptState.LOCAL_ONLY
                         else -> TranscriptState.AWAITING_KEY
                     },
                     transcriptError = if (transcribe && !hasKey) {
