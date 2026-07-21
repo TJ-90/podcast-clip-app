@@ -1,5 +1,8 @@
 package com.tj90.podcastclip.model
 
+import android.net.Uri
+import java.io.File
+
 data class Podcast(
     val feedUrl: String,
     val title: String,
@@ -18,8 +21,18 @@ data class Episode(
     val audioUrl: String,
     val artworkUrl: String,
     val publishedAt: Long,
-    val durationMs: Long
-)
+    val durationMs: Long,
+    val downloadedPath: String = ""
+) {
+    val playableUri: String
+        get() = downloadedPath
+            .takeIf { it.isNotBlank() && File(it).isFile }
+            ?.let { Uri.fromFile(File(it)).toString() }
+            ?: audioUrl
+
+    val isDownloaded: Boolean
+        get() = downloadedPath.isNotBlank() && File(downloadedPath).isFile
+}
 
 data class Clip(
     val id: String,
@@ -38,10 +51,19 @@ data class Clip(
 
 enum class TranscriptState {
     LOCAL_ONLY,
+    AWAITING_KEY,
     SENDING,
     COMPLETE,
+    RATE_LIMITED,
+    OUTCOME_UNKNOWN,
     FAILED
 }
+
+data class PlaybackBookmark(
+    val episodeId: String,
+    val positionMs: Long,
+    val speed: Float
+)
 
 data class PodcastSearchResult(
     val feedUrl: String,
