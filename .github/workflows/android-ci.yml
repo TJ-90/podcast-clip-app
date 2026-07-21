@@ -151,6 +151,7 @@ jobs:
           disable-animations: true
           script: |
             gradle --no-daemon connectedDebugAndroidTest
+            gradle --no-daemon installDebug
             adb shell am start -n com.tj90.podcastclip/.MainActivity
             sleep 3
             mkdir -p app/build/reports/device-smoke
