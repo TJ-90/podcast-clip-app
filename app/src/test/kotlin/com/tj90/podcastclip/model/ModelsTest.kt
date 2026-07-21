@@ -15,11 +15,14 @@ class ModelsTest {
     }
 
     @Test
-    fun transcriptStatesKeepLocalFailureSeparateFromClipData() {
+    fun transcriptStatesMakeEveryBillingRelevantOutcomeExplicit() {
         assertThat(TranscriptState.entries).containsExactly(
             TranscriptState.LOCAL_ONLY,
+            TranscriptState.AWAITING_KEY,
             TranscriptState.SENDING,
             TranscriptState.COMPLETE,
+            TranscriptState.RATE_LIMITED,
+            TranscriptState.OUTCOME_UNKNOWN,
             TranscriptState.FAILED
         ).inOrder()
     }

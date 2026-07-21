@@ -52,4 +52,21 @@ class RssFeedParserTest {
 
         assertThat(result.isFailure).isTrue()
     }
+
+@Test
+fun rejectsDoctypeAndExternalEntityPayloads() {
+    val malicious = """
+        <!DOCTYPE rss [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
+        <rss><channel><title>&xxe;</title></channel></rss>
+    """.trimIndent()
+
+    val result = runCatching {
+        RssFeedParser().parse(
+            ByteArrayInputStream(malicious.toByteArray()),
+            "https://example.com/feed.xml"
+        )
+    }
+
+    assertThat(result.isFailure).isTrue()
+}
 }
